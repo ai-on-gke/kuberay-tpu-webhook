@@ -6,10 +6,9 @@ def tpu_cores():
 
     print("TPU cores:" + str(jax.device_count()))
     return "TPU cores:" + str(jax.device_count())
-    
+
 
 ray.init(
-    address="ray://ray-cluster-kuberay-head-svc:10001",
     runtime_env={
         "pip": [
             "jax[tpu]==0.4.11",
