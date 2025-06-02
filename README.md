@@ -1,6 +1,6 @@
 # KubeRay with TPUs User Guide
 
-This page contains instructions for how to set up Ray on GKE with TPUs. 
+This page contains instructions for how to set up Ray on GKE with TPUs.
 
 
 ### Prerequisites
@@ -60,7 +60,7 @@ ray.init(
     address="ray://ray-cluster-kuberay-head-svc:10001",
     runtime_env={
         "pip": [
-            "jax[tpu]==0.4.12",
+            "jax[tpu]",
             "-f https://storage.googleapis.com/jax-releases/libtpu_releases.html",
         ]
     }
@@ -79,5 +79,5 @@ print(ray.get(result))
 2. `kubectl port-forward svc/ray-cluster-kuberay-head-svc 8265:8265 &`
 3. `export RAY_ADDRESS=http://localhost:8265`
 4. `ray job submit --runtime-env-json='{"working_dir": "."}' -- python test_tpu.py`
-   
+
 For a more advanced workload running Stable Diffusion on TPUs, see [here](https://cloud.google.com/kubernetes-engine/docs/add-on/ray-on-gke/tutorials/deploy-ray-serve-stable-diffusion-tpu). For an example of serving a LLM with TPUs, RayServe, and KubeRay, see [here](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-lllm-tpu-ray).
