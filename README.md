@@ -25,6 +25,10 @@ helm install --create-namespace --namespace cert-manager --set installCRDs=true 
 After installing cert-manager, it may take up to two minutes for the certificate to become ready.
 
 Installing the webhook:
+
+Version X of this webhook is compatible with KubeRay versions lower than 1.4.0.
+Version Y of this webhook is compatible with KubeRay versions 1.4.0 and above.
+
 1. `git clone https://github.com/ai-on-gke/kuberay-tpu-webhook`
 2. `cd kuberay-tpu-webhook`
 3. `make deploy`
