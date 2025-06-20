@@ -915,6 +915,7 @@ func Test_InjectPodAffinity(t *testing.T) {
 		replicaIndex         int
 		groupName            string
 		expectedReplicaLabel string
+		expectedClusterLabel string
 	}{
 		"injectPodAffinity with replicaIndex label": {
 			// should create a patch to create a podAffinity for the replicaIndex label
@@ -922,6 +923,7 @@ func Test_InjectPodAffinity(t *testing.T) {
 			replicaIndex:         0,
 			groupName:            "test-group-name",
 			expectedReplicaLabel: "test-group-name-0",
+			expectedClusterLabel: "test-cluster",
 		},
 	}
 
@@ -933,8 +935,24 @@ func Test_InjectPodAffinity(t *testing.T) {
 			patchValue := expectedPatches[0]["value"]
 			affinity := patchValue.(corev1.Affinity)
 			assert.Equal(t, "/spec/affinity", expectedPatches[0]["path"])
-			labelValue := affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchExpressions[0].Values[0]
-			assert.Equal(t, labelValue, tc.expectedReplicaLabel)
+
+			affinityTerms := affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
+
+			// Convert label selector match expressions to a map for easier test assertions
+			matchExprs := map[string]metav1.LabelSelectorRequirement{}
+			for _, expr := range affinityTerms.LabelSelector.MatchExpressions {
+				matchExprs[expr.Key] = expr
+			}
+
+			// Validate replicaIndex label selector
+			replicaExpr := matchExprs["replicaIndex"]
+			assert.Equal(t, metav1.LabelSelectorOpIn, replicaExpr.Operator)
+			assert.Equal(t, []string{tc.expectedReplicaLabel}, replicaExpr.Values)
+
+			// Validate ray.io/cluster label selector
+			clusterExpr := matchExprs["ray.io/cluster"]
+			assert.Equal(t, metav1.LabelSelectorOpIn, clusterExpr.Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, clusterExpr.Values)
 		})
 	}
 }
@@ -1490,11 +1508,11 @@ func Test_GenerateHeadlessServiceName(t *testing.T) {
 		expectedServiceName string
 	}{
 		"RayCluster name + -{HEADLESS_SERVICE_SUFFIX} is less than 50 chars, no truncation": {
-			testRayClusterName:  "test-raycluster",          // 15 chars
+			testRayClusterName:  "test-raycluster", // 15 chars
 			expectedServiceName: utils.CheckName(fmt.Sprintf("%s-%s", "test-raycluster", utils.HeadlessServiceSuffix)),
 		},
 		"RayCluster name + -{HEADLESS_SERVICE_SUFFIX} is more than 50 chars, name is truncated": {
-			testRayClusterName:  "extremely-really-really-long-test-raycluster-name",  // 49 chars
+			testRayClusterName:  "extremely-really-really-long-test-raycluster-name", // 49 chars
 			expectedServiceName: utils.CheckName(fmt.Sprintf("%s-%s", "extremely-really-really-long-test-raycluster-name", utils.HeadlessServiceSuffix)),
 		},
 	}

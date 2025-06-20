@@ -292,7 +292,7 @@ func injectHostnames(clusterName string, hostNames string, envPath string, conta
 func injectReplicaLabel(clusterName string, namespace string, replicaIndex int, workerGroupName string, patches *[]patch) {
 	labelPatch := patch{"op": "replace"}
 	labelPath := "/metadata/labels/replicaIndex"
-	replicaLabelValue := workerGroupName + "-" + strconv.Itoa(replicaIndex)
+	replicaLabelValue := fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
 
 	klog.V(1).InfoS("injectReplicaLabel", "RayCluster", namespace+"/"+clusterName, "replicaIndex", replicaLabelValue)
 
@@ -302,21 +302,34 @@ func injectReplicaLabel(clusterName string, namespace string, replicaIndex int, 
 	*patches = append(*patches, labelPatch)
 }
 
-// injectPodAffinity injects pod affinity and anti-affinity scheduling constraints using replicaIndex label
+// makeLabelSelectorRequirement is a helper function to create a LabelSelectorRequirement
+// with a given key, operator, and values.
+func makeLabelSelectorRequirement(key string, op metav1.LabelSelectorOperator, values ...string) metav1.LabelSelectorRequirement {
+	return metav1.LabelSelectorRequirement{
+		Key:      key,
+		Operator: op,
+		Values:   values,
+	}
+}
+
+// injectPodAffinity injects pod affinity scheduling constraints using replicaIndex and cluster labels
+// to ensure TPU Pods from the same multi-host replica are co-located.
 func injectPodAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, patches *[]patch) {
-	key := "replicaIndex"
-	value := workerGroupName + "-" + strconv.Itoa(replicaIndex)
-	topologyKey := "cloud.google.com/gke-nodepool"
 	clusterName := pod.Labels["ray.io/cluster"]
 	namespace := pod.Namespace
+	replicaIndexLabel := fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
+	topologyKey := "cloud.google.com/gke-nodepool"
 
-	klog.V(1).InfoS("injectPodAffinity", "RayCluster", namespace+"/"+clusterName, "podAffinity match label", value)
+	klog.V(1).InfoS("injectPodAffinity", "RayCluster", namespace+"/"+clusterName, "replicaIndex label", replicaIndexLabel)
 
-	// construct affinity value to inject - schedule pods with the same replicaIndex together
+	// Label selector requirements to ensure unique replica indices per RayCluster are co-located.
+	replicaIndexReq := makeLabelSelectorRequirement("replicaIndex", metav1.LabelSelectorOpIn, replicaIndexLabel)
+	clusterNameReq := makeLabelSelectorRequirement("ray.io/cluster", metav1.LabelSelectorOpIn, clusterName)
+
+	// Construct affinity value to inject - schedule pods with the same replicaIndex together
 	podAffinityPatch := patch{"op": "add"}
 
-	affinitySelectorRequirement := metav1.LabelSelectorRequirement{Key: key, Operator: metav1.LabelSelectorOpIn, Values: []string{value}}
-	affinityMatchExpressions := []metav1.LabelSelectorRequirement{affinitySelectorRequirement}
+	affinityMatchExpressions := []metav1.LabelSelectorRequirement{replicaIndexReq, clusterNameReq}
 	affinityLabelSelector := metav1.LabelSelector{MatchExpressions: affinityMatchExpressions}
 	podAffinityTerms := []corev1.PodAffinityTerm{corev1.PodAffinityTerm{LabelSelector: &affinityLabelSelector, TopologyKey: topologyKey}}
 	podAffinity := corev1.PodAffinity{RequiredDuringSchedulingIgnoredDuringExecution: podAffinityTerms}
@@ -330,6 +343,38 @@ func injectPodAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string
 	}
 
 	*patches = append(*patches, podAffinityPatch)
+}
+
+// injectPodAntiAffinity injects pod anti-affinity scheduling constraints using replicaIndex and cluster labels.
+// It prevents pods with different replicaIndex or ray.io/cluster from being co-scheduled on the same node pool.
+func injectPodAntiAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, patches *[]patch) {
+	clusterName := pod.Labels["ray.io/cluster"]
+	namespace := pod.Namespace
+	replicaIndexLabel := fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
+	topologyKey := "cloud.google.com/gke-nodepool"
+
+	klog.V(1).InfoS("injectPodAntiAffinity", "RayCluster", namespace+"/"+clusterName, "replicaIndex label", replicaIndexLabel)
+
+	// Construct anti-affinity value to inject - don't schedule pods on a nodepool with existing Pods carrying that
+	// label with different values
+	replicaIndexAntiReq := makeLabelSelectorRequirement("replicaIndex", metav1.LabelSelectorOpNotIn, replicaIndexLabel)
+	clusterNameAntiReq := makeLabelSelectorRequirement("ray.io/cluster", metav1.LabelSelectorOpNotIn, clusterName)
+
+	antiAffinityMatchExpressions := []metav1.LabelSelectorRequirement{replicaIndexAntiReq, clusterNameAntiReq}
+	antiAffinityLabelSelector := metav1.LabelSelector{MatchExpressions: antiAffinityMatchExpressions}
+	podAntiAffinityTerms := []corev1.PodAffinityTerm{corev1.PodAffinityTerm{LabelSelector: &antiAffinityLabelSelector, TopologyKey: topologyKey}}
+	podAntiAffinity := corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: podAntiAffinityTerms}
+
+	podAntiAffinityPatch := patch{"op": "add"}
+	if pod.Spec.Affinity != nil {
+		podAntiAffinityPatch["path"] = "/spec/affinity/podAntiAffinity"
+		podAntiAffinityPatch["value"] = podAntiAffinity
+	} else {
+		podAntiAffinityPatch["path"] = "/spec/affinity"
+		podAntiAffinityPatch["value"] = corev1.Affinity{PodAntiAffinity: &podAntiAffinity}
+	}
+
+	*patches = append(*patches, podAntiAffinityPatch)
 }
 
 // checkWorkersMatchTopology returns whether the # of Ray TPU worker pods equals the # of hosts defined in the topology key
@@ -663,7 +708,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 	if numOfHosts > 1 {
 		// inject hostname into pod spec for DNS records
-		hostname := fmt.Sprintf(groupName+"-%d-%d", replicaIndex, tpuWorkerID)
+		hostname := fmt.Sprintf("%s-%d-%d", groupName, replicaIndex, tpuWorkerID)
 		klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "hostname", hostname)
 		hostnamePatch := patch{"op": "add"}
 		hostnamePatch["path"] = "/spec/hostname"
@@ -672,6 +717,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 		// inject pod affinity/anti-affinity for scheduling
 		injectPodAffinity(pod, replicaIndex, groupName, &patches)
+		injectPodAntiAffinity(pod, replicaIndex, groupName, &patches)
 	}
 
 	// inject all environment variables into the container requesting TPUs
