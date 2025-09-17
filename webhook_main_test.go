@@ -1,6 +1,19 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1653,4 +1666,107 @@ func Test_GenerateHeadlessServiceName(t *testing.T) {
 			assert.Equal(t, tc.expectedServiceName, serviceName)
 		})
 	}
+}
+
+// getCertFromServer is helper function to fetch the certificate currently being served.
+func getCertFromServer(t *testing.T, addr string) *x509.Certificate {
+	t.Helper()
+
+	// Create a TLS config for self-signed certificate.
+	conf := &tls.Config{InsecureSkipVerify: true}
+
+	conn, err := tls.Dial("tcp", addr, conf)
+	if err != nil {
+		t.Fatalf("Failed to dial TLS server at %s: %v", addr, err)
+	}
+	defer conn.Close()
+
+	// Get the certificate chain.
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		t.Fatal("Server did not present any certificates.")
+	}
+	return certs[0]
+}
+
+// generateTestCertKeyPair is a helper function to create a new self-signed cert/key pair for testing.
+func generateTestCertKeyPair(t *testing.T, orgName, certPath, keyPath string) {
+	t.Helper()
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("Failed to generate private key: %v", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("Failed to generate serial number: %v", err)
+	}
+
+	// Define the Certificate for test.
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      pkix.Name{Organization: []string{orgName}},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(5 * time.Minute),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("Failed to create certificate: %v", err)
+	}
+
+	// Write certificate file.
+	certOut, _ := os.Create(certPath)
+	defer certOut.Close()
+	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+
+	// Write key file.
+	keyOut, _ := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	defer keyOut.Close()
+	privBytes, _ := x509.MarshalPKCS8PrivateKey(priv)
+	pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
+}
+
+// TestWebhookCertReloadsOnChange verifies that the server correctly reloads TLS certificate.
+func TestWebhookCertReloadsOnChange(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Set webhook flags.
+	CertFile = filepath.Join(tmpDir, "tls.crt")
+	KeyFile = filepath.Join(tmpDir, "tls.key")
+	BindAddr = "127.0.0.1:45443" // arbitrary unique port
+
+	// Generate the initial certificate and key.
+	generateTestCertKeyPair(t, "Test-Cert", CertFile, KeyFile)
+
+	// Start the webhook server.
+	go func() {
+		err := startServer(NewTPUWebhookServer(nil))
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Logf("Webhook server failed unexpectedly: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify initial certificate.
+	initialCert := getCertFromServer(t, BindAddr)
+	assert.Equal(t, "Test-Cert", initialCert.Subject.Organization[0], "Unexpected initial certificate")
+	t.Logf("Successfully connected and verified initial certificate.")
+
+	// Update certificate file.
+	t.Log("Generating and writing reloaded certificate...")
+	generateTestCertKeyPair(t, "Reloaded-Cert", CertFile, KeyFile)
+	time.Sleep(500 * time.Millisecond) // Give cert-watcher time to reload.
+
+	// Check for the new certificate.
+	reloadedCert := getCertFromServer(t, BindAddr)
+	assert.Equal(t, "Reloaded-Cert", reloadedCert.Subject.Organization[0], "Expected reloaded cert with new org")
+
+	// Final check to ensure the new cert is different from the old one.
+	assert.NotEqual(t, initialCert.SerialNumber, reloadedCert.SerialNumber, "Certificate was not reloaded; serial number is unchanged.")
+	t.Logf("Server successfully reloaded the certificate with cert-watcher.")
 }
