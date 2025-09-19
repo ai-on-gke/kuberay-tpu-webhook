@@ -16,6 +16,8 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.tpuWebhook.namespace.name }}
+  labels:
+    {{- toYaml .Values.tpuWebhook.namespace.labels | nindent 4 }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -63,26 +65,20 @@ spec:
         app:  kuberay-tpu-webhook
     spec:
       serviceAccountName: kuberay-tpu-webhook
+      securityContext:
+        {{- toYaml .Values.tpuWebhook.deployment.podSecurityContext | nindent 8 }}
       containers:
         - image: "{{ .Values.tpuWebhook.image.repository }}:{{ .Values.tpuWebhook.image.tag }}"
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-              add:
-              - "NET_BIND_SERVICE"
-            readOnlyRootFilesystem: true
-            runAsUser: 2007
-            seccompProfile:
-              type: RuntimeDefault
+            {{- toYaml .Values.tpuWebhook.deployment.containerSecurityContext | nindent 12 }}
           imagePullPolicy: {{ .Values.tpuWebhook.image.pullPolicy }}
           name: {{ .Chart.Name }}
           args:
           - --v={{ .Values.tpuWebhook.deployment.verbosity }}
+          - --bind-address=:{{ .Values.tpuWebhook.deployment.bindPort }}
           ports:
           - name: https
-            containerPort: 443
+            containerPort: {{ .Values.tpuWebhook.deployment.bindPort }}
             protocol: TCP
           livenessProbe:
             httpGet:
