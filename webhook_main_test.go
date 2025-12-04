@@ -1398,24 +1398,30 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 
 func Test_MutatePod(t *testing.T) {
 	tests := map[string]struct {
-		testPod              *corev1.Pod
-		numOfHosts           int
-		existingPods         int
-		existingReplicas     int
-		missingContainers    bool
-		expectedWorkerID     string
-		expectedReplicaID    int
-		expectedWorkerName   string
-		expectedHostnames    string
-		expectedReplicaLabel string
-		expectedError        error
-		// TPU device plugin addr
+		testPod                      *corev1.Pod
+		numOfHosts                   int
+		existingPods                 int
+		existingReplicas             int
+		missingContainers            bool
+		expectedWorkerID             string
+		expectedReplicaID            int
+		expectedWorkerName           string
+		expectedHostnames            string
+		expectedReplicaLabel         string
+		expectedError                error
 		expectedDevicePluginHostAddr map[string]interface{}
 		expectedDevicePluginAddr     string
+		checkMultiSlice              bool
+		useKubeRayLabels             bool
 	}{
+		"mutatePod for CPU pod": {
+			// no TPU requested - pass through.
+			testPod:       getTestCPUWorker("test-cluster", "test-group", "test-namespace"),
+			expectedError: nil,
+		},
 		"mutatePod missing cluster label": {
 			// missing Ray cluster label - returns error
-			testPod:       getTestCPUWorker("", "test-group", "test-namespace"),
+			testPod:       getTestTPUWorker("", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
 			expectedError: errors.New("Ray Pod created by KubeRay missing RayCluster label"),
 		},
 		"mutatePod missing container": {
@@ -1426,7 +1432,7 @@ func Test_MutatePod(t *testing.T) {
 		},
 		"mutatePod missing gke-tpu-topology nodeSelector": {
 			// requests TPUs, topology not specified - returns error
-			testPod:           getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
+			testPod:           getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "", "4"),
 			missingContainers: false,
 			expectedError:     errors.New("Ray Pod created by KubeRay missing TPU topology nodeSelector"),
 		},
@@ -1453,7 +1459,8 @@ func Test_MutatePod(t *testing.T) {
 			expectedWorkerID:   "0",
 			expectedReplicaID:  0,
 			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 0),
-			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
+			expectedHostnames: strings.Join([]string{
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 1, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 2, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 3, "test-cluster", utils.HeadlessServiceSuffix),
@@ -1461,8 +1468,6 @@ func Test_MutatePod(t *testing.T) {
 			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 0),
 		},
 		"mutatePod subsequent Pod in multi-host TPU worker group": {
-			// requests TPUs, multi-host - injects hostname, subdomain, TPU_WORKER_ID, TPU_NAME,
-			// TPU_HOSTNAMES, a podAffinity field, and the replicaIndex label
 			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x4", "4"),
 			numOfHosts:         4,
 			existingPods:       3,
@@ -1470,7 +1475,8 @@ func Test_MutatePod(t *testing.T) {
 			expectedWorkerID:   "3",
 			expectedReplicaID:  0,
 			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 0),
-			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
+			expectedHostnames: strings.Join([]string{
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 1, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 2, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 3, "test-cluster", utils.HeadlessServiceSuffix),
@@ -1478,8 +1484,6 @@ func Test_MutatePod(t *testing.T) {
 			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 0),
 		},
 		"mutatePod first multi-host Pod in subsequent multi-slice TPU worker group": {
-			// requests TPUs, multi-host - injects hostname, subdomain, TPU_WORKER_ID, TPU_NAME,
-			// TPU_HOSTNAMES, a podAffinity field, and the replicaIndex label
 			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x4", "4"),
 			numOfHosts:         4,
 			existingPods:       4,
@@ -1487,7 +1491,8 @@ func Test_MutatePod(t *testing.T) {
 			expectedWorkerID:   "0",
 			expectedReplicaID:  1,
 			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 1),
-			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "test-cluster", utils.HeadlessServiceSuffix),
+			expectedHostnames: strings.Join([]string{
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 1, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 2, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 3, "test-cluster", utils.HeadlessServiceSuffix),
@@ -1495,8 +1500,6 @@ func Test_MutatePod(t *testing.T) {
 			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 1),
 		},
 		"mutatePod subsequent multi-host Pod in subsequent multi-slice TPU worker group": {
-			// requests TPUs, multi-host - injects hostname, subdomain, TPU_WORKER_ID, TPU_NAME,
-			// TPU_HOSTNAMES, a podAffinity field, and the replicaIndex label
 			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x4", "4"),
 			numOfHosts:         4,
 			existingPods:       5,
@@ -1504,141 +1507,187 @@ func Test_MutatePod(t *testing.T) {
 			expectedWorkerID:   "1",
 			expectedReplicaID:  1,
 			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 1),
-			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "test-cluster", utils.HeadlessServiceSuffix),
+			expectedHostnames: strings.Join([]string{
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 1, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 2, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 3, "test-cluster", utils.HeadlessServiceSuffix),
 			}, ","),
 			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 1),
 		},
+		"mutatePod Multi-Slice TPU worker group": {
+			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x4", "4"),
+			numOfHosts:         4,
+			existingPods:       0,
+			existingReplicas:   0,
+			expectedWorkerID:   "0",
+			expectedReplicaID:  0,
+			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 0),
+			expectedHostnames: strings.Join([]string{
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 1, "test-cluster", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 2, "test-cluster", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 3, "test-cluster", utils.HeadlessServiceSuffix),
+			}, ","),
+			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 0),
+			checkMultiSlice:      true,
+			useKubeRayLabels:     true,
+		},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			// set up Pod object
+			inputPod := tc.testPod.DeepCopy()
+
 			if tc.missingContainers {
-				tc.testPod.Spec.Containers = nil
+				inputPod.Spec.Containers = nil
+			} else if tc.checkMultiSlice {
+				// Inject MEGASCALE_NUM_SLICES so that the webhook injects dynamically
+				// set multi-slice vars to Pods. MEGASCALE_NUM_SLICES is expected to be set
+				// by the user or in the Ray application code.
+				inputPod.Spec.Containers[0].Env = append(inputPod.Spec.Containers[0].Env, corev1.EnvVar{
+					Name:  "MEGASCALE_NUM_SLICES",
+					Value: "2",
+				})
+			}
+
+			if tc.useKubeRayLabels {
+				if inputPod.Labels == nil {
+					inputPod.Labels = make(map[string]string)
+				}
+				inputPod.Labels[utils.RayWorkerReplicaIndexKey] = fmt.Sprint(tc.expectedReplicaID)
+				inputPod.Labels[utils.RayHostIndexKey] = tc.expectedWorkerID
 			}
 
 			// set up admissionReview object
 			admissionReview := getTestAdmissionReview("Pod", "CREATE")
-			jsonPod, _ := json.Marshal(tc.testPod)
+			jsonPod, _ := json.Marshal(inputPod)
 			admissionReview.Request.Object.Raw = jsonPod
-			admissionReview.Request.Object.Object = tc.testPod
+			admissionReview.Request.Object.Object = inputPod
 
-			// generate Pod list and create Pod Lister
-			testTPUPods := getTestInterceptedTPUPods(tc.testPod, tc.existingPods, tc.existingReplicas, tc.numOfHosts)
+			// generate Pod list for the lister (simulating EXISTING pods, not the one being created)
+			testTPUPods := getTestInterceptedTPUPods(inputPod, tc.existingPods, tc.existingReplicas, tc.numOfHosts)
 			testPodLister := setupInformer(testTPUPods...)
 
 			// set up TPUWebhookServer
 			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
-
 			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
-			if err != nil {
-				assert.Equal(t, tc.expectedError, err)
-			} else {
-				var patches []patch
-				json.Unmarshal(admissionResponse.Patch, &patches)
 
-				if tc.numOfHosts == 1 {
-					// single-host - patches should add replicaIndex label, TPU_WORKER_ID, and TPU_NAME
-					workerID := patches[1]
-					workerName := patches[2]
-					expectedIDPatch := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_WORKER_ID", "value": tc.expectedWorkerID}})
-					expectedNamePatch := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_NAME", "value": tc.expectedWorkerName}})
-					// TPU device plugin addr
-					workerDevicePluginHostAddr := patches[3]
-					expectedDevicePluginHostAddr := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_DEVICE_PLUGIN_HOST_IP", "valueFrom": tc.expectedDevicePluginHostAddr}})
-					workerDevicePluginAddr := patches[4]
-					expectedDevicePluginAddr := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_DEVICE_PLUGIN_ADDR", "value": tc.expectedDevicePluginAddr}})
-					assert.Equal(t, tc.expectedReplicaLabel, patches[0]["value"])
-					assert.Equal(t, expectedIDPatch, workerID["value"])
-					assert.Equal(t, expectedNamePatch, workerName["value"])
-					assert.Equal(t, expectedDevicePluginHostAddr, workerDevicePluginHostAddr["value"])
-					assert.Equal(t, expectedDevicePluginAddr, workerDevicePluginAddr["value"])
-				}
-				if tc.numOfHosts > 1 {
-					// multi-host - patches should add replicaIndex, hostname, podAffinity, subdomain,
-					// TPU_WORKER_HOSTNAMES, TPU_WORKER_ID, and TPU_NAME
-					expectedIDPatch := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_WORKER_ID", "value": tc.expectedWorkerID}})
-					expectedNamePatch := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_NAME", "value": tc.expectedWorkerName}})
-					expectedHostnamesPatch := []interface{}([]interface{}{map[string]interface{}{"name": "TPU_WORKER_HOSTNAMES", "value": tc.expectedHostnames}})
-					expectedAffinityPatchValue := map[string]interface{}{
-						"podAffinity": map[string]interface{}{
-							"requiredDuringSchedulingIgnoredDuringExecution": []interface{}{
-								map[string]interface{}{
-									"labelSelector": map[string]interface{}{
-										"matchExpressions": []interface{}{
-											map[string]interface{}{
-												"key":      "replicaIndex",
-												"operator": "In",
-												"values":   []interface{}{tc.expectedReplicaLabel},
-											},
-											map[string]interface{}{
-												"key":      "ray.io/cluster",
-												"operator": "In",
-												"values":   []interface{}{"test-cluster"},
-											},
-										},
-									},
-									"topologyKey": "cloud.google.com/gke-nodepool",
-								},
-							},
-						},
-						"podAntiAffinity": map[string]interface{}{
-							"requiredDuringSchedulingIgnoredDuringExecution": []interface{}{
-								map[string]interface{}{
-									"labelSelector": map[string]interface{}{
-										"matchExpressions": []interface{}{
-											map[string]interface{}{
-												"key":      "replicaIndex",
-												"operator": "NotIn",
-												"values":   []interface{}{tc.expectedReplicaLabel},
-											},
-											map[string]interface{}{
-												"key":      "ray.io/cluster",
-												"operator": "In",
-												"values":   []interface{}{"test-cluster"},
-											},
-										},
-									},
-									"topologyKey": "cloud.google.com/gke-nodepool",
-								},
-								map[string]interface{}{
-									"labelSelector": map[string]interface{}{
-										"matchExpressions": []interface{}{
-											map[string]interface{}{
-												"key":      "ray.io/cluster",
-												"operator": "NotIn",
-												"values":   []interface{}{"test-cluster"},
-											},
-											map[string]interface{}{
-												"key":      "replicaIndex",
-												"operator": "Exists",
-											},
-										},
-									},
-									"topologyKey": "cloud.google.com/gke-nodepool",
-									"namespaceSelector": map[string]interface{}{
-										"matchExpressions": []interface{}{
-											map[string]interface{}{
-												"key":      "kubernetes.io/metadata.name",
-												"operator": "NotIn",
-												"values":   []interface{}{"kube-system"},
-											},
-										},
-									},
-								},
-							},
-						},
+			if tc.expectedError != nil {
+				assert.Equal(t, tc.expectedError, err)
+				return
+			}
+
+			if !containerRequestingTPUs(inputPod.Spec.Containers...) {
+				assert.Empty(t, admissionResponse.Patch, "Expected no patches for non-TPU worker")
+				return
+			}
+
+			var patches []patch
+			json.Unmarshal(admissionResponse.Patch, &patches)
+
+			// Helper: Find patch value by exact path
+			findPatchValue := func(path string) interface{} {
+				for _, p := range patches {
+					if p["path"] == path {
+						return p["value"]
 					}
-					assert.Equal(t, tc.expectedReplicaLabel, patches[0]["value"])
-					assert.Equal(t, fmt.Sprintf("%s-%s", tc.expectedReplicaLabel, tc.expectedWorkerID), patches[1]["value"])
-					assert.Equal(t, expectedAffinityPatchValue, patches[2]["value"])
-					assert.Equal(t, fmt.Sprintf("%s-%s", "test-cluster", utils.HeadlessServiceSuffix), patches[3]["value"])
-					assert.Equal(t, expectedHostnamesPatch, patches[4]["value"])
-					assert.Equal(t, expectedIDPatch, patches[5]["value"])
-					assert.Equal(t, expectedNamePatch, patches[6]["value"])
+				}
+				return nil
+			}
+
+			// Helper: Find Env Var map by name
+			findEnvVarPatch := func(name string) map[string]interface{} {
+				for _, p := range patches {
+					if valList, ok := p["value"].([]interface{}); ok {
+						for _, v := range valList {
+							if vMap, ok := v.(map[string]interface{}); ok {
+								if vMap["name"] == name {
+									return vMap
+								}
+							}
+						}
+					}
+					if valMap, ok := p["value"].(map[string]interface{}); ok {
+						if valMap["name"] == name {
+							return valMap
+						}
+					}
+				}
+				return nil
+			}
+
+			// Validate all expected patches exist.
+			// Check replicaIndex Label
+			if tc.useKubeRayLabels {
+				// In this case, we shouldn't inject a label because it's handled by KubeRay.
+				assert.Nil(t, findPatchValue("/metadata/labels/replicaIndex"), "Legacy replicaIndex label should NOT be patched.")
+			} else {
+				assert.Equal(t, tc.expectedReplicaLabel, findPatchValue("/metadata/labels/replicaIndex"))
+			}
+
+			// 1. Check Replica Label
+			if tc.useKubeRayLabels {
+				assert.Nil(t, findPatchValue("/metadata/labels/replicaIndex"), "Legacy replicaIndex label should NOT be patched in Fast Path")
+			} else {
+				assert.Equal(t, tc.expectedReplicaLabel, findPatchValue("/metadata/labels/replicaIndex"))
+			}
+
+			// 2. Check TPU_WORKER_ID
+			workerIDMap := findEnvVarPatch("TPU_WORKER_ID")
+			if assert.NotNil(t, workerIDMap, "TPU_WORKER_ID patch missing") {
+				assert.Equal(t, tc.expectedWorkerID, workerIDMap["value"])
+			}
+
+			// 3. Check TPU_NAME
+			workerNameMap := findEnvVarPatch("TPU_NAME")
+			if assert.NotNil(t, workerNameMap, "TPU_NAME patch missing") {
+				assert.Equal(t, tc.expectedWorkerName, workerNameMap["value"])
+			}
+
+			// 4. Check Device Plugin Host IP
+			pluginHostMap := findEnvVarPatch("TPU_DEVICE_PLUGIN_HOST_IP")
+			assert.NotNil(t, pluginHostMap, "TPU_DEVICE_PLUGIN_HOST_IP missing")
+
+			// 5. Check Device Plugin Addr
+			pluginAddrMap := findEnvVarPatch("TPU_DEVICE_PLUGIN_ADDR")
+			if assert.NotNil(t, pluginAddrMap, "TPU_DEVICE_PLUGIN_ADDR missing") {
+				assert.Equal(t, "$(TPU_DEVICE_PLUGIN_HOST_IP):2112", pluginAddrMap["value"])
+			}
+
+			if tc.numOfHosts > 1 {
+				// 6. Check Hostname
+				assert.Equal(t, fmt.Sprintf("%s-%s", tc.expectedReplicaLabel, tc.expectedWorkerID), findPatchValue("/spec/hostname"))
+
+				// 7. Check Subdomain
+				assert.Equal(t, fmt.Sprintf("%s-%s", "test-cluster", utils.HeadlessServiceSuffix), findPatchValue("/spec/subdomain"))
+
+				// 8. Check TPU_WORKER_HOSTNAMES
+				hostnamesMap := findEnvVarPatch("TPU_WORKER_HOSTNAMES")
+				if assert.NotNil(t, hostnamesMap, "TPU_WORKER_HOSTNAMES patch missing") {
+					assert.Equal(t, tc.expectedHostnames, hostnamesMap["value"])
+				}
+
+				// 9. Check Affinity
+				affinity := findPatchValue("/spec/affinity")
+				assert.NotNil(t, affinity, "Affinity patch missing")
+			}
+
+			// 10. Check Multi-Slice / Megascale
+			if tc.checkMultiSlice {
+				sliceIDMap := findEnvVarPatch("MEGASCALE_SLICE_ID")
+				if assert.NotNil(t, sliceIDMap, "MEGASCALE_SLICE_ID missing") {
+					assert.Equal(t, fmt.Sprint(tc.expectedReplicaID), sliceIDMap["value"])
+				}
+
+				coordMap := findEnvVarPatch("MEGASCALE_COORDINATOR_ADDRESS")
+				if assert.NotNil(t, coordMap, "MEGASCALE_COORDINATOR_ADDRESS missing") {
+					assert.Equal(t, fmt.Sprintf("%s-0-0.%s-%s", "test-group", "test-cluster", utils.HeadlessServiceSuffix), coordMap["value"])
+				}
+
+				portMap := findEnvVarPatch("MEGASCALE_PORT")
+				if assert.NotNil(t, portMap, "MEGASCALE_PORT missing") {
+					assert.Equal(t, "8081", portMap["value"])
 				}
 			}
 		})

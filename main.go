@@ -647,6 +647,24 @@ func waitTimeout(wait *sync.WaitGroup, timeout time.Duration) bool {
 	}
 }
 
+// addEnvVarPatch is a helper to create a JSON patch to add an environment variable to a container.
+// It returns the updated patch slice and a boolean indicating that the env array now exists.
+func addEnvVarPatch(patches []patch, envVar corev1.EnvVar, path string, envArrayExists bool) ([]patch, bool) {
+	p := patch{"op": "add"}
+	if envArrayExists {
+		// Env array exists, append to it.
+		p["path"] = fmt.Sprintf("%s/-", path)
+		p["value"] = envVar
+	} else {
+		// Env array doesn't exist, create it.
+		p["path"] = path
+		p["value"] = []corev1.EnvVar{envVar}
+	}
+	patches = append(patches, p)
+
+	return patches, true
+}
+
 // mutatePod returns an Admission Response after injecting TPU related fields to a given Pod
 func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionReview) (*admissionv1.AdmissionResponse, error) {
 	pod, err := extractPod(admissionReview)
@@ -688,32 +706,61 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	chipsPerHost := getNumTPUChipsRequested(containers...)
 	numOfHosts, _ := getNumTPUHostsFromTopology(clusterName, groupName, namespace, topology, chipsPerHost) // ignore error here because topology may not be set yet
 
-	// Wait for PodInformer cache to update from previous requests or timeout
-	if waitTimeout(&t.wg, time.Second*1) {
-		klog.V(1).Info("MutatePod", "PodInformer AddFunc called for prior admission request")
+	// Pod indexing variables from K8s labels or assigned dynamically.
+	var replicaIndex int
+	var tpuWorkerID int
+
+	replicaIndexStr, hasReplicaLabel := pod.Labels[utils.RayWorkerReplicaIndexKey]
+	hostIndexStr, hasHostLabel := pod.Labels[utils.RayHostIndexKey]
+
+	if hasReplicaLabel && hasHostLabel {
+		// In KubeRay v1.5, Pod indexing is performed by RayCluster controller when RayMultiHostIndexing
+		// feature is enabled.
+		klog.V(1).InfoS("mutatePod", "Found Ray indexing labels for KubeRay Pod", pod.Name)
+
+		var err error
+		replicaIndex, err = strconv.Atoi(replicaIndexStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse replica index label: %w", err)
+		}
+
+		tpuWorkerID, err = strconv.Atoi(hostIndexStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse host index label: %w", err)
+		}
 	} else {
-		klog.V(1).Info("MutatePod", "Timed out waiting for PodInformer AddFunc")
-	}
-	// Add 1 to the WaitGroup to represent the pending Pod to the cache
-	defer t.wg.Add(1)
-	t.waiting += 1
+		// Fallback for older KubeRay versions that do not set K8s index labels.
+		// Wait for PodInformer cache to update from previous requests or timeout.
+		if waitTimeout(&t.wg, time.Second*1) {
+			klog.V(1).Info("MutatePod", "PodInformer AddFunc called for prior admission request")
+		} else {
+			klog.V(1).Info("MutatePod", "Timed out waiting for PodInformer AddFunc")
+		}
+		// Add 1 to the WaitGroup to represent the pending Pod to the cache
+		defer t.wg.Add(1)
+		t.waiting += 1
 
-	// query k8s client to populate sliceToWorkerIDs to then calculate the next TPU_WORKER_ID and replicaIndex
-	sliceToWorkerIDs, err := t.getSliceToWorkerIDs(clusterName, groupName, namespace, numOfHosts)
-	if err != nil {
-		return nil, err
-	}
-	replicaIndex := getReplicaIndex(sliceToWorkerIDs, clusterName, groupName, namespace)
-	podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
-	tpuWorkerID, err := getNextWorkerID(sliceToWorkerIDs, podSlice, namespace, replicaIndex) // defaults to 0 for single-host
-	if err != nil {
-		return nil, err
-	}
-	// set the unique identifier for the last admitted Pod by this TPUWebhookServer
-	t.lastAdmitted = fmt.Sprintf("%s-%s-%d-%d", namespace, clusterName, replicaIndex, tpuWorkerID)
+		// query k8s client to populate sliceToWorkerIDs
+		sliceToWorkerIDs, err := t.getSliceToWorkerIDs(clusterName, groupName, namespace, numOfHosts)
+		if err != nil {
+			return nil, err
+		}
 
-	// inject replica index label
-	injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
+		replicaIndex = getReplicaIndex(sliceToWorkerIDs, clusterName, groupName, namespace)
+		podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
+		tpuWorkerID, err = getNextWorkerID(sliceToWorkerIDs, podSlice, namespace, replicaIndex)
+		if err != nil {
+			return nil, err
+		}
+
+		// Update state for next request
+		t.lastAdmitted = fmt.Sprintf("%s-%s-%d-%d", namespace, clusterName, replicaIndex, tpuWorkerID)
+
+		// Manually inject the replicaIndex label
+		injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
+	}
+
+	headlessServiceName := generateHeadlessServiceName(clusterName)
 
 	if numOfHosts > 1 {
 		// inject hostname into pod spec for DNS records
@@ -733,6 +780,38 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		container := containers[i]
 		if containerRequestingTPUs(container) {
 			path := fmt.Sprintf("/spec/containers/%d/env", i)
+			envArrayExists := len(container.Env) > 0
+
+			// Multi-Slice variable injection logic.
+			if _, exists := getEnvironmentVariable("MEGASCALE_NUM_SLICES", container); exists {
+				// Set MEGASCALE_SLICE_ID, the index of this replica within the worker group.
+				// Multiple TPU multi-host replicas in the same worker group are assumed to be apart
+				// of a multi-slice configuration.
+				if val, _ := getEnvironmentVariable("MEGASCALE_SLICE_ID", container); val == "" {
+					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+						Name:  "MEGASCALE_SLICE_ID",
+						Value: fmt.Sprint(replicaIndex),
+					}, path, envArrayExists || len(patches) > 0)
+				}
+
+				// Set MEGASCALE_COORDINATOR_ADDRESS, the address of worker 0 of slice 0.
+				if val, _ := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", container); val == "" {
+					coordAddress := fmt.Sprintf("%s-0-0.%s", groupName, headlessServiceName)
+					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+						Name:  "MEGASCALE_COORDINATOR_ADDRESS",
+						Value: coordAddress,
+					}, path, true)
+				}
+
+				// Set MEGASCALE_PORT, defaulting to 8081 since 8080 is used by Ray for metrics.
+				if val, _ := getEnvironmentVariable("MEGASCALE_PORT", container); val == "" {
+					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+						Name:  "MEGASCALE_PORT",
+						Value: "8081",
+					}, path, true)
+				}
+			}
+
 			if numOfHosts > 1 {
 				// inject TPU_WORKER_HOSTNAMES
 				hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
