@@ -74,6 +74,9 @@ func getTestTPUWorker(clusterName string, groupName string, namespace string, ac
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "tpu-pod",
 			Namespace: namespace,
+			Annotations: map[string]string{
+				tpuAffinityTopologyKeyAnnotation: tpuSliceLabel,
+			},
 			Labels: map[string]string{
 				utils.RayNodeLabelKey:      "yes",
 				utils.RayClusterLabelKey:   clusterName,
@@ -941,6 +944,8 @@ func Test_InjectAffinity(t *testing.T) {
 		groupName            string
 		expectedReplicaLabel string
 		expectedClusterLabel string
+		expectedTopologyKey  string
+		expectedPatches      int
 	}{
 		"injectAffinity with replicaIndex and cluster labels": {
 			testPod:              getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
@@ -948,6 +953,18 @@ func Test_InjectAffinity(t *testing.T) {
 			groupName:            "test-group-name",
 			expectedReplicaLabel: "test-group-name-0",
 			expectedClusterLabel: "test-cluster",
+			expectedTopologyKey:  tpuSliceLabel,
+			expectedPatches:      1,
+		},
+		"injectAffinity skips without topology key": {
+			testPod: func() *corev1.Pod {
+				pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4")
+				pod.Annotations = nil
+				return pod
+			}(),
+			replicaIndex:    0,
+			groupName:       "test-group-name",
+			expectedPatches: 0,
 		},
 	}
 
@@ -957,13 +974,17 @@ func Test_InjectAffinity(t *testing.T) {
 
 			injectAffinity(tc.testPod, tc.replicaIndex, tc.groupName, &patches)
 
-			assert.Len(t, patches, 1)
+			assert.Len(t, patches, tc.expectedPatches)
+			if tc.expectedPatches == 0 {
+				return
+			}
 			assert.Equal(t, "/spec/affinity", patches[0]["path"])
 
 			affinity := patches[0]["value"].(corev1.Affinity)
 
 			// Validate PodAffinity is injected with expected label selectors
 			podAffinityTerms := affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			assert.Equal(t, tc.expectedTopologyKey, podAffinityTerms[0].TopologyKey)
 			podMatchExprs := map[string]metav1.LabelSelectorRequirement{}
 			for _, expr := range podAffinityTerms[0].LabelSelector.MatchExpressions {
 				podMatchExprs[expr.Key] = expr
@@ -977,6 +998,7 @@ func Test_InjectAffinity(t *testing.T) {
 			podAntiAffinityTerms := affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 			// Check anti-affinity for Pods of same cluster and different replicaIndex
 			term1MatchExprs := map[string]metav1.LabelSelectorRequirement{}
+			assert.Equal(t, tc.expectedTopologyKey, podAntiAffinityTerms[0].TopologyKey)
 			for _, expr := range podAntiAffinityTerms[0].LabelSelector.MatchExpressions {
 				term1MatchExprs[expr.Key] = expr
 			}
@@ -987,6 +1009,7 @@ func Test_InjectAffinity(t *testing.T) {
 
 			// Check anti-affinity for Pods of different cluster when replicaIndex exists
 			term2MatchExprs := map[string]metav1.LabelSelectorRequirement{}
+			assert.Equal(t, tc.expectedTopologyKey, podAntiAffinityTerms[1].TopologyKey)
 			for _, expr := range podAntiAffinityTerms[1].LabelSelector.MatchExpressions {
 				term2MatchExprs[expr.Key] = expr
 			}

@@ -75,6 +75,11 @@ var (
 	certPath        = "/etc/kuberay-tpu-webhook/tls/tls.crt"
 	keyPath         = "/etc/kuberay-tpu-webhook/tls/tls.key"
 	tpuResourceName = corev1.ResourceName("google.com/tpu")
+	tpuSliceLabel   = "cloud.google.com/gke-tpu-slice"
+
+	// tpuAffinityTopologyKeyAnnotation allows overriding the topology key used for TPU affinity.
+	// If not provided, the webhook defaults to tpuSliceLabel.
+	tpuAffinityTopologyKeyAnnotation = "ray.io/tpu-affinity-topology-key"
 
 	// Flag arguments.
 	BindAddr       string
@@ -316,67 +321,185 @@ func makeLabelSelectorRequirement(key string, op metav1.LabelSelectorOperator, v
 	}
 }
 
+func getTPUAffinityTopologyKey(pod *corev1.Pod) (string, bool) {
+	if pod == nil {
+		return "", false
+	}
+	if pod.Annotations != nil {
+		if val := strings.TrimSpace(pod.Annotations[tpuAffinityTopologyKeyAnnotation]); val != "" {
+			return val, true
+		}
+	}
+	if pod.Spec.NodeSelector != nil {
+		if _, ok := pod.Spec.NodeSelector[tpuSliceLabel]; ok {
+			return tpuSliceLabel, true
+		}
+	}
+	return "", false
+}
+
+func labelSelectorRequirementKey(req metav1.LabelSelectorRequirement) string {
+	values := append([]string(nil), req.Values...)
+	sort.Strings(values)
+	return fmt.Sprintf("%s|%s|%s", req.Key, req.Operator, strings.Join(values, ","))
+}
+
+func labelSelectorRequirementsEqual(a, b []metav1.LabelSelectorRequirement) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	index := make(map[string]int, len(a))
+	for _, req := range a {
+		index[labelSelectorRequirementKey(req)]++
+	}
+	for _, req := range b {
+		key := labelSelectorRequirementKey(req)
+		if index[key] == 0 {
+			return false
+		}
+		index[key]--
+	}
+	return true
+}
+
+func labelSelectorEqual(a, b *metav1.LabelSelector) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if len(a.MatchLabels) != len(b.MatchLabels) {
+		return false
+	}
+	for key, value := range a.MatchLabels {
+		if b.MatchLabels[key] != value {
+			return false
+		}
+	}
+	return labelSelectorRequirementsEqual(a.MatchExpressions, b.MatchExpressions)
+}
+
+func podAffinityTermEqual(a, b corev1.PodAffinityTerm) bool {
+	if a.TopologyKey != b.TopologyKey {
+		return false
+	}
+	if !labelSelectorEqual(a.LabelSelector, b.LabelSelector) {
+		return false
+	}
+	if !labelSelectorEqual(a.NamespaceSelector, b.NamespaceSelector) {
+		return false
+	}
+	if len(a.Namespaces) != len(b.Namespaces) {
+		return false
+	}
+	namespaceSet := make(map[string]struct{}, len(a.Namespaces))
+	for _, ns := range a.Namespaces {
+		namespaceSet[ns] = struct{}{}
+	}
+	for _, ns := range b.Namespaces {
+		if _, ok := namespaceSet[ns]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func podAffinityTermExists(terms []corev1.PodAffinityTerm, term corev1.PodAffinityTerm) bool {
+	for _, existing := range terms {
+		if podAffinityTermEqual(existing, term) {
+			return true
+		}
+	}
+	return false
+}
+
 // injectAffinity injects pod affinity and anti-affinity scheduling constraints using replicaIndex and cluster labels
 // to ensure TPU Pods from the same multi-host replica are co-located.
 func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, patches *[]patch) {
 	clusterName := pod.Labels["ray.io/cluster"]
 	replicaIndexLabel := fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
-	topologyKey := "cloud.google.com/gke-nodepool"
+	topologyKey, ok := getTPUAffinityTopologyKey(pod)
+	if !ok {
+		klog.V(1).InfoS("injectAffinity", "RayCluster", pod.Namespace+"/"+clusterName, "message", "skipping affinity injection; no topology key available")
+		return
+	}
 
 	// Co-schedule on a node-pool Pods with the same replicaIndex and RayCluster label
 	replicaIndexIn := makeLabelSelectorRequirement("replicaIndex", metav1.LabelSelectorOpIn, replicaIndexLabel)
 	clusterIn := makeLabelSelectorRequirement("ray.io/cluster", metav1.LabelSelectorOpIn, clusterName)
-	podAffinity := corev1.PodAffinity{
-		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-			LabelSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{replicaIndexIn, clusterIn},
-			},
-			TopologyKey: topologyKey,
-		}},
+	// Remove RequiredDuringSchedulingIgnoredDuringExecution for backward compatibility with existing RayClusters
+	podAffinityTerm := corev1.PodAffinityTerm{
+		LabelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{replicaIndexIn, clusterIn},
+		},
+		TopologyKey: topologyKey,
 	}
 	// Avoid scheduling on a node-pool with Pods of a different RayCluster and ANY replicaIndex label
 	replicaIndexNotIn := makeLabelSelectorRequirement("replicaIndex", metav1.LabelSelectorOpNotIn, replicaIndexLabel)
 	clusterNotIn := makeLabelSelectorRequirement("ray.io/cluster", metav1.LabelSelectorOpNotIn, clusterName)
 	replicaIndexExists := makeLabelSelectorRequirement("replicaIndex", metav1.LabelSelectorOpExists)
-	podAntiAffinity := corev1.PodAntiAffinity{
-		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
-			{
-				LabelSelector: &metav1.LabelSelector{
-					MatchExpressions: []metav1.LabelSelectorRequirement{
-						replicaIndexNotIn,
-						clusterIn,
-					},
+	podAntiAffinityTerms := []corev1.PodAffinityTerm{
+		{
+			LabelSelector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					replicaIndexNotIn,
+					clusterIn,
 				},
-				TopologyKey: topologyKey,
 			},
-			{
-				LabelSelector: &metav1.LabelSelector{
-					MatchExpressions: []metav1.LabelSelectorRequirement{
-						clusterNotIn,
-						replicaIndexExists,
-					},
+			TopologyKey: topologyKey,
+		},
+		{
+			LabelSelector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					clusterNotIn,
+					replicaIndexExists,
 				},
-				TopologyKey: topologyKey,
-				NamespaceSelector: &metav1.LabelSelector{
-					MatchExpressions: []metav1.LabelSelectorRequirement{
-						{
-							Key:      "kubernetes.io/metadata.name",
-							Operator: metav1.LabelSelectorOpNotIn,
-							Values:   []string{"kube-system"}, // match all except kube-system
-						},
+			},
+			TopologyKey: topologyKey,
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      "kubernetes.io/metadata.name",
+						Operator: metav1.LabelSelectorOpNotIn,
+						Values:   []string{"kube-system"}, // match all except kube-system
 					},
 				},
 			},
 		},
 	}
 
-	combinedAffinity := corev1.Affinity{
-		PodAffinity:     &podAffinity,
-		PodAntiAffinity: &podAntiAffinity,
+	var combinedAffinity corev1.Affinity
+	if pod.Spec.Affinity != nil {
+		combinedAffinity = *pod.Spec.Affinity.DeepCopy()
+	}
+	if combinedAffinity.PodAffinity == nil {
+		combinedAffinity.PodAffinity = &corev1.PodAffinity{}
+	}
+	if !podAffinityTermExists(combinedAffinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution, podAffinityTerm) {
+		combinedAffinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+			combinedAffinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+			podAffinityTerm,
+		)
+	}
+	if combinedAffinity.PodAntiAffinity == nil {
+		combinedAffinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
+	}
+	for _, term := range podAntiAffinityTerms {
+		if !podAffinityTermExists(combinedAffinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, term) {
+			combinedAffinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+				combinedAffinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+				term,
+			)
+		}
 	}
 
+	op := "add"
+	if pod.Spec.Affinity != nil {
+		op = "replace"
+	}
 	*patches = append(*patches, patch{
-		"op":    "add",
+		"op":    op,
 		"path":  "/spec/affinity",
 		"value": combinedAffinity,
 	})
