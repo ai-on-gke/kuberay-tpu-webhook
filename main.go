@@ -76,6 +76,10 @@ var (
 	keyPath         = "/etc/kuberay-tpu-webhook/tls/tls.key"
 	tpuResourceName = corev1.ResourceName("google.com/tpu")
 
+	// TPU related constants.
+	tpuProcessPortBase = 8476
+	megascalePortBase  = 8081
+
 	// Flag arguments.
 	BindAddr       string
 	KubeConfigPath string
@@ -271,16 +275,32 @@ func genDNSHostnames(numOfHosts int32, groupName string, clusterName string, nam
 	return strings.Join(hostNames, ","), nil
 }
 
-// injectHostnames injects subdomain and TPU_WORKER_HOSTNAMES into a Pod for TPU multi-host initialization
+// getTPUProcessAdresses returns the list of process addresses (host:port) for all containers in the slice.
+// The base port is 8476. TPU_PROCESS_ADDRESSES replaces TPU_WORKER_HOSTNAMES for Ironwood (v7x) TPUs and newer.
+func getTPUProcessAdresses(numOfHosts int32, numTpuContainers int, groupName, clusterName string, replicaIndex int) (string, error) {
+	if numOfHosts == 0 {
+		return "", errors.New("workerGroupSpec NumOfHosts not set")
+	}
+	headlessServiceName := generateHeadlessServiceName(clusterName)
+	var addresses []string
+
+	for h := 0; h < int(numOfHosts); h++ {
+		hostName := fmt.Sprintf("%s-%d-%d.%s", groupName, replicaIndex, h, headlessServiceName)
+		for c := 0; c < numTpuContainers; c++ {
+			port := tpuProcessPortBase + c
+			addresses = append(addresses, fmt.Sprintf("%s:%d", hostName, port))
+		}
+	}
+	return strings.Join(addresses, ","), nil
+}
+
+// injectHostnames TPU_WORKER_HOSTNAMES into a Pod for multi-host initialization.
 func injectHostnames(clusterName string, hostNames string, envPath string, container corev1.Container, patches *[]patch) {
-	subdomainPatch, hostNamesPatch := patch{"op": "add"}, patch{"op": "add"}
-	subdomainPath := "/spec/subdomain"
+	hostNamesPatch := patch{"op": "add"}
 	tpuWorkerHostNames := corev1.EnvVar{
 		Name:  "TPU_WORKER_HOSTNAMES",
 		Value: hostNames,
 	}
-	subdomainPatch["path"] = subdomainPath
-	subdomainPatch["value"] = generateHeadlessServiceName(clusterName)
 	// create new EnvVar array if container.Env is empty, and append hostnames if not
 	if len(container.Env) == 0 {
 		hostNamesPatch["path"] = envPath
@@ -289,7 +309,17 @@ func injectHostnames(clusterName string, hostNames string, envPath string, conta
 		hostNamesPatch["path"] = fmt.Sprintf("%s/-", envPath)
 		hostNamesPatch["value"] = tpuWorkerHostNames
 	}
-	*patches = append(*patches, subdomainPatch, hostNamesPatch)
+	*patches = append(*patches, hostNamesPatch)
+}
+
+// injectSubdomain sets the Pod subdomain to match the headless service.
+func injectSubdomain(clusterName string, patches *[]patch) {
+	subdomainPatch := patch{
+		"op":    "add",
+		"path":  "/spec/subdomain",
+		"value": generateHeadlessServiceName(clusterName),
+	}
+	*patches = append(*patches, subdomainPatch)
 }
 
 // injectReplicaLabel injects replicaIndex label into a Pod for TPU Pod scheduling and Ray multi-host autoscaling
@@ -706,6 +736,22 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	chipsPerHost := getNumTPUChipsRequested(containers...)
 	numOfHosts, _ := getNumTPUHostsFromTopology(clusterName, groupName, namespace, topology, chipsPerHost) // ignore error here because topology may not be set yet
 
+	// Detect v7x TPU accelerator
+	isV7x := false
+	if selector, ok := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]; ok && strings.HasPrefix(selector, "tpu7x") {
+		isV7x = true
+	}
+
+	// v7x (Ironwood) TPUs can run multiple NUMA-aligned containers per Pod to optimize
+	// memory bandwidth across the dual-chiplet architecture. We count them to assign
+	// unique worker IDs and network ports to each independent ML process.
+	numTpuContainers := 0
+	for _, c := range containers {
+		if containerRequestingTPUs(c) {
+			numTpuContainers++
+		}
+	}
+
 	// Pod indexing variables from K8s labels or assigned dynamically.
 	var replicaIndex int
 	var tpuWorkerID int
@@ -763,24 +809,32 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	headlessServiceName := generateHeadlessServiceName(clusterName)
 
 	if numOfHosts > 1 {
-		// inject hostname into pod spec for DNS records
+		// inject hostname and subdomain into pod spec for DNS records
 		hostname := fmt.Sprintf("%s-%d-%d", groupName, replicaIndex, tpuWorkerID)
 		klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "hostname", hostname)
-		hostnamePatch := patch{"op": "add"}
-		hostnamePatch["path"] = "/spec/hostname"
-		hostnamePatch["value"] = hostname
+		hostnamePatch := patch{"op": "add", "path": "/spec/hostname", "value": hostname}
 		patches = append(patches, hostnamePatch)
+
+		injectSubdomain(clusterName, &patches)
 
 		// inject pod affinity/anti-affinity for scheduling
 		injectAffinity(pod, replicaIndex, groupName, &patches)
 	}
 
 	// inject all environment variables into the container requesting TPUs
+	tpuContainerIndex := 0
 	for i := 0; i < len(containers); i++ {
 		container := containers[i]
 		if containerRequestingTPUs(container) {
 			path := fmt.Sprintf("/spec/containers/%d/env", i)
 			envArrayExists := len(container.Env) > 0
+
+			// Legacy behavior is unique TPU_WORKER_ID per TPU Pod. With Ironwood
+			// TPU and newer, worker IDs are unique per container requesting TPU.
+			finalWorkerID := tpuWorkerID
+			if isV7x {
+				finalWorkerID = (tpuWorkerID * numTpuContainers) + tpuContainerIndex
+			}
 
 			// Multi-Slice variable injection logic.
 			if _, exists := getEnvironmentVariable("MEGASCALE_NUM_SLICES", container); exists {
@@ -797,6 +851,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 				// Set MEGASCALE_COORDINATOR_ADDRESS, the address of worker 0 of slice 0.
 				if val, _ := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", container); val == "" {
 					coordAddress := fmt.Sprintf("%s-0-0.%s", groupName, headlessServiceName)
+					if isV7x {
+						// Target container 0's port
+						coordAddress = fmt.Sprintf("%s:%d", coordAddress, megascalePortBase)
+					}
 					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_COORDINATOR_ADDRESS",
 						Value: coordAddress,
@@ -804,30 +862,49 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 				}
 
 				// Set MEGASCALE_PORT, defaulting to 8081 since 8080 is used by Ray for metrics.
+				megascalePort := fmt.Sprint(megascalePortBase)
+				if isV7x {
+					megascalePort = fmt.Sprint(megascalePortBase + tpuContainerIndex)
+				}
 				if val, _ := getEnvironmentVariable("MEGASCALE_PORT", container); val == "" {
 					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_PORT",
-						Value: "8081",
+						Value: megascalePort,
 					}, path, true)
 				}
 			}
-
+			// Network addressing injection logic.
 			if numOfHosts > 1 {
-				// inject TPU_WORKER_HOSTNAMES
-				hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
-				if err != nil {
-					return nil, err
+				if isV7x {
+					// v7x: Inject TPU_PROCESS_ADDRESSES & TPU_PROCESS_PORT
+					if val, _ := getEnvironmentVariable("TPU_PROCESS_ADDRESSES", container); val == "" {
+						processAddresses, err := getTPUProcessAdresses(numOfHosts, numTpuContainers, groupName, clusterName, replicaIndex)
+						if err != nil {
+							return nil, err
+						}
+						klog.V(1).InfoS("mutatePod v7x", "RayCluster", namespace+"/"+clusterName, "TPU_PROCESS_ADDRESSES", processAddresses)
+						patches, _ = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_ADDRESSES", Value: processAddresses}, path, true)
+					}
+
+					if val, _ := getEnvironmentVariable("TPU_PROCESS_PORT", container); val == "" {
+						patches, _ = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, true)
+					}
+				} else {
+					// Legacy: inject TPU_WORKER_HOSTNAMES
+					hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
+					if err != nil {
+						return nil, err
+					}
+					klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_HOSTNAMES", hostnames)
+					injectHostnames(clusterName, hostnames, path, container, &patches)
 				}
-				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_HOSTNAMES", hostnames)
-				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "subdomain", generateHeadlessServiceName(clusterName))
-				injectHostnames(clusterName, hostnames, path, container, &patches)
 			}
 			// inject TPU_WORKER_ID
 			if value, _ := getEnvironmentVariable("TPU_WORKER_ID", container); value == "" {
-				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", tpuWorkerID, "Replica Index", replicaIndex)
+				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", finalWorkerID, "Replica Index", replicaIndex)
 				workerID := corev1.EnvVar{
 					Name:  "TPU_WORKER_ID",
-					Value: fmt.Sprint(tpuWorkerID),
+					Value: fmt.Sprint(finalWorkerID),
 				}
 				idPatch := patch{"op": "add"}
 				// create new EnvVar array if container.Env is empty, and append new EnvVars if not
@@ -902,6 +979,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 				}
 				patches = append(patches, pluginAddrPatch)
 			}
+			tpuContainerIndex++
 		}
 	}
 

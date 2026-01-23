@@ -863,15 +863,13 @@ func Test_InjectHostnames(t *testing.T) {
 	tests := map[string]struct {
 		clusterName       string
 		groupName         string
-		expectedSubdomain string
 		expectedHostnames string
 	}{
 		"injectHostnames for multi-host worker group": {
-			// Should create a patch to set the subdomain and TPU_WORKER_HOSTNAMES for all hosts.
+			// Should create a patch to set TPU_WORKER_HOSTNAMES for all hosts.
 			// This function is only called for multi-host TPU worker groups.
-			clusterName:       "test-cluster",
-			groupName:         "test-group-name",
-			expectedSubdomain: fmt.Sprintf("%s-%s", "test-cluster", utils.HeadlessServiceSuffix),
+			clusterName: "test-cluster",
+			groupName:   "test-group-name",
 			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 1, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 2, "test-cluster", utils.HeadlessServiceSuffix),
@@ -879,11 +877,10 @@ func Test_InjectHostnames(t *testing.T) {
 			}, ","),
 		},
 		"injectHostnames for multi-host worker group with truncated service name": {
-			// Should create a patch to set the subdomain and TPU_WORKER_HOSTNAMES for all hosts, with the
+			// Should create a patch to set the TPU_WORKER_HOSTNAMES for all hosts, with the
 			// correct subdomain truncated to match the created service name.
-			clusterName:       "really-really-extremely-long-test-raycluster-name",
-			groupName:         "test-group-name",
-			expectedSubdomain: fmt.Sprintf("%s-%s", "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
+			clusterName: "really-really-extremely-long-test-raycluster-name",
+			groupName:   "test-group-name",
 			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 1, "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 2, "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
@@ -892,19 +889,44 @@ func Test_InjectHostnames(t *testing.T) {
 		},
 	}
 
-	// check that a valid subdomain and TPU_WORKER_HOSTNAMES are injected into the Pod
+	// check that valid TPU_WORKER_HOSTNAMES are injected into the Pod
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			testPod := getTestTPUWorker(tc.clusterName, tc.groupName, "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
 			expectedEnv := []corev1.EnvVar{corev1.EnvVar{Name: "TPU_WORKER_HOSTNAMES", Value: tc.expectedHostnames}}
 			patches := []patch{}
 			injectHostnames(tc.clusterName, tc.expectedHostnames, "/spec/containers/0/env", testPod.Spec.Containers[0], &patches)
-			// check subdomain patch
+			// check hostnames patch
+			assert.Equal(t, "/spec/containers/0/env", patches[0]["path"])
+			assert.Equal(t, expectedEnv, patches[0]["value"])
+		})
+	}
+}
+
+func Test_InjectSubdomain(t *testing.T) {
+	tests := map[string]struct {
+		clusterName       string
+		expectedSubdomain string
+	}{
+		"injectSubdomain sets correct headless service name": {
+			clusterName:       "test-cluster",
+			expectedSubdomain: fmt.Sprintf("%s-%s", "test-cluster", utils.HeadlessServiceSuffix),
+		},
+		"injectSubdomain handles truncated service name": {
+			clusterName:       "really-really-extremely-long-test-raycluster-name",
+			expectedSubdomain: fmt.Sprintf("%s-%s", "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			patches := []patch{}
+			injectSubdomain(tc.clusterName, &patches)
+
+			// verify that the subdomain is injected correctly
+			assert.Len(t, patches, 1)
 			assert.Equal(t, "/spec/subdomain", patches[0]["path"])
 			assert.Equal(t, tc.expectedSubdomain, patches[0]["value"])
-			// check hostnames patch
-			assert.Equal(t, "/spec/containers/0/env", patches[1]["path"])
-			assert.Equal(t, expectedEnv, patches[1]["value"])
 		})
 	}
 }
@@ -1818,4 +1840,205 @@ func TestWebhookCertReloadsOnChange(t *testing.T) {
 	// Final check to ensure the new cert is different from the old one.
 	assert.NotEqual(t, initialCert.SerialNumber, reloadedCert.SerialNumber, "Certificate was not reloaded; serial number is unchanged.")
 	t.Logf("Server successfully reloaded the certificate with cert-watcher.")
+}
+
+func Test_GetTPUProcessAdresses(t *testing.T) {
+	tests := map[string]struct {
+		numOfHosts       int32
+		numTpuContainers int
+		clusterName      string
+		replicaIndex     int
+		expected         string
+		expectedError    error
+	}{
+		"getTPUProcessAdresses with NumOfHosts == 0": {
+			// Invalid case - NumOfHosts can't be 0.
+			numOfHosts:       0,
+			numTpuContainers: 2,
+			clusterName:      "test-cluster",
+			replicaIndex:     0,
+			expectedError:    errors.New("workerGroupSpec NumOfHosts not set"),
+		},
+		"getTPUProcessAdresses single host, multi-container": {
+			// 1 host, 2 containers -> generates 2 ports on host 0.
+			numOfHosts:       1,
+			numTpuContainers: 2,
+			clusterName:      "test-cluster",
+			replicaIndex:     0,
+			expected: strings.Join([]string{
+				fmt.Sprintf("test-group-0-0.test-cluster-%s:8476", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-0-0.test-cluster-%s:8477", utils.HeadlessServiceSuffix),
+			}, ","),
+		},
+		"getTPUProcessAdresses multi-host, multi-container.": {
+			// 2 hosts, 2 containers -> generates 4 addresses.
+			numOfHosts:       2,
+			numTpuContainers: 2,
+			clusterName:      "test-cluster",
+			replicaIndex:     1,
+			expected: strings.Join([]string{
+				fmt.Sprintf("test-group-1-0.test-cluster-%s:8476", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-0.test-cluster-%s:8477", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-1.test-cluster-%s:8476", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-1.test-cluster-%s:8477", utils.HeadlessServiceSuffix),
+			}, ","),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			actual, err := getTPUProcessAdresses(tc.numOfHosts, tc.numTpuContainers, "test-group", tc.clusterName, tc.replicaIndex)
+
+			if tc.expectedError != nil {
+				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expected, actual)
+			}
+		})
+	}
+}
+
+func Test_MutatePod_V7x(t *testing.T) {
+	tests := map[string]struct {
+		numOfHosts              int32
+		customEnv               []corev1.EnvVar
+		expectedWorkerID        string
+		expectedPort            string
+		expectedLogDir          string
+		expectedMegascalePort   string
+		expectedMegascaleCoord  string
+		expectPatchForAddresses bool
+		expectPatchForPort      bool
+		isMultiSlice            bool
+	}{
+		"v7x standard multi-container injection": {
+			numOfHosts:              2,
+			customEnv:               nil,
+			expectedWorkerID:        "1",
+			expectedPort:            "8477", // Base port + 1
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
+			expectPatchForAddresses: true,
+			expectPatchForPort:      true,
+			isMultiSlice:            false,
+		},
+		"v7x respects user-defined ports and addresses": {
+			numOfHosts: 2,
+			customEnv: []corev1.EnvVar{
+				{Name: "TPU_PROCESS_PORT", Value: "9999"},
+				{Name: "TPU_PROCESS_ADDRESSES", Value: "custom-mesh:9999"},
+			},
+			expectedWorkerID:        "1",
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
+			expectPatchForAddresses: false,
+			expectPatchForPort:      false,
+			isMultiSlice:            false,
+		},
+		"v7x megascale multi-slice coordination": {
+			numOfHosts: 2,
+			customEnv: []corev1.EnvVar{
+				{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
+			},
+			expectedWorkerID:        "1",
+			expectedPort:            "8477",
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
+			expectedMegascalePort:   "8082", // Base port + 1
+			expectedMegascaleCoord:  fmt.Sprintf("test-group-0-0.test-cluster-%s:8081", utils.HeadlessServiceSuffix),
+			expectPatchForAddresses: true,
+			expectPatchForPort:      true,
+			isMultiSlice:            true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			inputPod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x-standard-4t", "2x2x2", "2")
+
+			// Add user-specified env vars
+			if tc.customEnv != nil {
+				inputPod.Spec.Containers[0].Env = append(inputPod.Spec.Containers[0].Env, tc.customEnv...)
+			}
+
+			// Add a second container that requests TPU.
+			secondContainer := inputPod.Spec.Containers[0].DeepCopy()
+			secondContainer.Name = "ray-worker-2"
+			inputPod.Spec.Containers = append(inputPod.Spec.Containers, *secondContainer)
+
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(inputPod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object.Object = inputPod
+
+			testPodLister := setupInformer()
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
+
+			// Validate Pod mutation for a Ironwood (v7x) TPU Pod contains the expected patches.
+			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+			assert.NoError(t, err)
+
+			var patches []patch
+			json.Unmarshal(admissionResponse.Patch, &patches)
+
+			// Helper to find Env Var patches per container
+			findContainerEnvPatch := func(name string) map[string]interface{} {
+				for _, p := range patches {
+					if p["path"] == "/spec/containers/1/env" || p["path"] == "/spec/containers/1/env/-" {
+						if valList, ok := p["value"].([]interface{}); ok {
+							for _, v := range valList {
+								if vMap, ok := v.(map[string]interface{}); ok {
+									if vMap["name"] == name {
+										return vMap
+									}
+								}
+							}
+						}
+						if valMap, ok := p["value"].(map[string]interface{}); ok {
+							if valMap["name"] == name {
+								return valMap
+							}
+						}
+					}
+				}
+				return nil
+			}
+
+			// Check TPU_WORKER_ID, should be unique per container in the slice.
+			workerIDMap := findContainerEnvPatch("TPU_WORKER_ID")
+			assert.NotNil(t, workerIDMap, "TPU_WORKER_ID patch missing")
+			assert.Equal(t, tc.expectedWorkerID, workerIDMap["value"])
+
+			// Check TPU_NAME, this is a unique ID for the TPU slice.
+			tpuNameMap := findContainerEnvPatch("TPU_NAME")
+			assert.NotNil(t, tpuNameMap, "TPU_NAME patch missing")
+			assert.Equal(t, "test-group-0", tpuNameMap["value"])
+
+			// Check networking related fields and env vars
+			addressMap := findContainerEnvPatch("TPU_PROCESS_ADDRESSES")
+			if tc.expectPatchForAddresses {
+				assert.NotNil(t, addressMap, "Expected TPU_PROCESS_ADDRESSES patch")
+				assert.Contains(t, addressMap["value"].(string), "test-group-0-0")
+			} else {
+				assert.Nil(t, addressMap, "Webhook overwrote user-defined TPU_PROCESS_ADDRESSES")
+			}
+
+			portMap := findContainerEnvPatch("TPU_PROCESS_PORT")
+			if tc.expectPatchForPort {
+				assert.NotNil(t, portMap, "Expected TPU_PROCESS_PORT patch")
+				assert.Equal(t, tc.expectedPort, portMap["value"])
+			} else {
+				assert.Nil(t, portMap, "Webhook overwrote user-defined TPU_PROCESS_PORT")
+			}
+
+			// Validate Megascale / multi-slice logic
+			if tc.isMultiSlice {
+				megascalePortMap := findContainerEnvPatch("MEGASCALE_PORT")
+				assert.NotNil(t, megascalePortMap, "MEGASCALE_PORT patch missing")
+				assert.Equal(t, tc.expectedMegascalePort, megascalePortMap["value"])
+
+				coordMap := findContainerEnvPatch("MEGASCALE_COORDINATOR_ADDRESS")
+				assert.NotNil(t, coordMap, "MEGASCALE_COORDINATOR_ADDRESS patch missing")
+				assert.Equal(t, tc.expectedMegascaleCoord, coordMap["value"])
+			}
+		})
+	}
 }
