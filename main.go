@@ -77,7 +77,7 @@ var (
 	tpuResourceName = corev1.ResourceName("google.com/tpu")
 
 	// TPU related constants.
-	tpuProcessPortBase = 8476
+	tpuProcessPortBase = 8471
 	megascalePortBase  = 8081
 
 	// Flag arguments.
@@ -875,8 +875,16 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			}
 			// Network addressing injection logic.
 			if numOfHosts > 1 {
+				// Legacy: inject TPU_WORKER_HOSTNAMES
+				hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
+				if err != nil {
+					return nil, err
+				}
+				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_HOSTNAMES", hostnames)
+				injectHostnames(clusterName, hostnames, path, container, &patches)
+
 				if isV7x {
-					// v7x: Inject TPU_PROCESS_ADDRESSES & TPU_PROCESS_PORT
+					// v7x only: Inject TPU_PROCESS_ADDRESSES & TPU_PROCESS_PORT
 					if val, _ := getEnvironmentVariable("TPU_PROCESS_ADDRESSES", container); val == "" {
 						processAddresses, err := getTPUProcessAdresses(numOfHosts, numTpuContainers, groupName, clusterName, replicaIndex)
 						if err != nil {
@@ -889,14 +897,6 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 					if val, _ := getEnvironmentVariable("TPU_PROCESS_PORT", container); val == "" {
 						patches, _ = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, true)
 					}
-				} else {
-					// Legacy: inject TPU_WORKER_HOSTNAMES
-					hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
-					if err != nil {
-						return nil, err
-					}
-					klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_HOSTNAMES", hostnames)
-					injectHostnames(clusterName, hostnames, path, container, &patches)
 				}
 			}
 			// inject TPU_WORKER_ID

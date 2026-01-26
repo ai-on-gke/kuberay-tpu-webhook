@@ -1866,8 +1866,8 @@ func Test_GetTPUProcessAdresses(t *testing.T) {
 			clusterName:      "test-cluster",
 			replicaIndex:     0,
 			expected: strings.Join([]string{
-				fmt.Sprintf("test-group-0-0.test-cluster-%s:8476", utils.HeadlessServiceSuffix),
-				fmt.Sprintf("test-group-0-0.test-cluster-%s:8477", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-0-0.test-cluster-%s:8471", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-0-0.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
 			}, ","),
 		},
 		"getTPUProcessAdresses multi-host, multi-container.": {
@@ -1877,10 +1877,10 @@ func Test_GetTPUProcessAdresses(t *testing.T) {
 			clusterName:      "test-cluster",
 			replicaIndex:     1,
 			expected: strings.Join([]string{
-				fmt.Sprintf("test-group-1-0.test-cluster-%s:8476", utils.HeadlessServiceSuffix),
-				fmt.Sprintf("test-group-1-0.test-cluster-%s:8477", utils.HeadlessServiceSuffix),
-				fmt.Sprintf("test-group-1-1.test-cluster-%s:8476", utils.HeadlessServiceSuffix),
-				fmt.Sprintf("test-group-1-1.test-cluster-%s:8477", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-0.test-cluster-%s:8471", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-0.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-1.test-cluster-%s:8471", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-1.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
 			}, ","),
 		},
 	}
@@ -1916,7 +1916,7 @@ func Test_MutatePod_V7x(t *testing.T) {
 			numOfHosts:              2,
 			customEnv:               nil,
 			expectedWorkerID:        "1",
-			expectedPort:            "8477", // Base port + 1
+			expectedPort:            "8472", // Base port + 1
 			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectPatchForAddresses: true,
 			expectPatchForPort:      true,
@@ -1940,7 +1940,7 @@ func Test_MutatePod_V7x(t *testing.T) {
 				{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
 			},
 			expectedWorkerID:        "1",
-			expectedPort:            "8477",
+			expectedPort:            "8472",
 			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectedMegascalePort:   "8082", // Base port + 1
 			expectedMegascaleCoord:  fmt.Sprintf("test-group-0-0.test-cluster-%s:8081", utils.HeadlessServiceSuffix),
