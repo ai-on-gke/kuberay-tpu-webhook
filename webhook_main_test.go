@@ -653,64 +653,73 @@ func Test_GetNumTPUHostsFromTopology(t *testing.T) {
 }
 
 func Test_GetNumTPUChipsRequested(t *testing.T) {
+	// Helper to create a container with specific TPU request/limit.
+	makeContainer := func(name string, req, lim string) corev1.Container {
+		c := corev1.Container{Name: name, Resources: corev1.ResourceRequirements{}}
+		if req != "" {
+			c.Resources.Requests = corev1.ResourceList{"google.com/tpu": resource.MustParse(req)}
+		}
+		if lim != "" {
+			c.Resources.Limits = corev1.ResourceList{"google.com/tpu": resource.MustParse(lim)}
+		}
+		return c
+	}
+
 	tests := map[string]struct {
-		testPod            *corev1.Pod
-		expectedTPULimit   map[corev1.ResourceName]resource.Quantity
-		expectedTPURequest map[corev1.ResourceName]resource.Quantity
-		expectedNumChips   int64
+		containers       []corev1.Container
+		expectedNumChips int64
 	}{
-		"getNumTPUChipsRequested no TPUs requested": {
+		"Single container, no TPUs": {
 			// doesn't request TPUs - returns 0
-			testPod:            getTestCPUWorker("test-cluster", "test-group", "test-namespace"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("0")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("0")},
-			expectedNumChips:   int64(0),
+			containers: []corev1.Container{
+				makeContainer("c1", "0", "0"),
+			},
+			expectedNumChips: 0,
 		},
-		"getNumTPUChipsRequested only TPU limit resource set": {
+		"Single container, explicit Request": {
+			// includes standard TPU request of 4 chips
+			containers: []corev1.Container{
+				makeContainer("c1", "4", "4"),
+			},
+			expectedNumChips: 4,
+		},
+		"Single container, only TPU limit specified": {
 			// includes TPU limits but omits request - defaults to limit value
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedTPURequest: nil,
-			expectedNumChips:   int64(4),
+			containers: []corev1.Container{
+				makeContainer("c1", "", "4"),
+			},
+			expectedNumChips: 4,
 		},
-		"getNumTPUChipsRequested with TPU Request > TPU Limit": {
-			// TPU Limit = maximum number of TPU chips requested
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("8")},
-			expectedNumChips:   int64(4),
+		"Multiple containers with TPU requests": {
+			containers: []corev1.Container{
+				makeContainer("c1", "2", "2"),
+				makeContainer("c2", "2", "2"),
+			},
+			expectedNumChips: 4,
 		},
-		"getNumTPUChipsRequested with v4 TPU request": {
-			// v4 - always 4 chips per VM
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedNumChips:   int64(4),
+		"Multiple containers with TPU limits": {
+			containers: []corev1.Container{
+				makeContainer("c1", "1", "4"), // Request takes precedence over limit
+				makeContainer("c2", "", "2"),  // Request defaults to limit
+			},
+			expectedNumChips: 3,
 		},
-		"getNumTPUChipsRequested with v5e ct5lp-hightpu-1t TPU request": {
-			// v5e - 1x1 and 1 chip per VM
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v5-lite-podslice", "1x1", "1"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("1")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("1")},
-			expectedNumChips:   int64(1),
-		},
-		"getNumTPUChipsRequested with v5e ct5lp-hightpu-8t TPU request": {
-			// v5e - 2x4 and 8 chips per VM
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v5-lite-podslice", "2x4", "8"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("8")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("8")},
-			expectedNumChips:   int64(8),
+		"Multiple containers with TPU and non-TPU": {
+			containers: []corev1.Container{
+				makeContainer("c1", "4", "4"),
+				{Name: "sidecar", Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{"cpu": resource.MustParse("1")},
+				}},
+			},
+			expectedNumChips: 4,
 		},
 	}
 
 	// validate that getNumTPUChipsRequested correctly returns the number of TPU chips requested per Pod container
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			container := tc.testPod.Spec.Containers[0]
-			container.Resources.Limits = tc.expectedTPULimit
-			container.Resources.Requests = tc.expectedTPURequest
-			chipsPerHost := getNumTPUChipsRequested(container)
-			assert.Equal(t, tc.expectedNumChips, chipsPerHost)
+			chips := getNumTPUChipsRequested(tc.containers...)
+			assert.Equal(t, tc.expectedNumChips, chips)
 		})
 	}
 }

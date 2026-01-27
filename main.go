@@ -192,27 +192,31 @@ func containerRequestingTPUs(containers ...corev1.Container) bool {
 	return false
 }
 
-// getNumTPUChipsRequested returns `google.com/TPU` Resource request value for the container
-// this indicates the number of TPU chips for the container to use
+// getNumTPUChipsRequested returns the total `google.com/TPU` Resource request value
+// summed across all containers. This indicates the total number of TPU chips the Pod requires.
 func getNumTPUChipsRequested(containers ...corev1.Container) int64 {
-	tpuLimit := int64(0)
-	tpuRequest := int64(0)
+	totalTPUs := int64(0)
 	for _, container := range containers {
-		if l := container.Resources.Limits; l != nil {
-			if resource := l[tpuResourceName]; !resource.IsZero() {
-				tpuLimit = resource.Value()
-			}
-		}
+		containerTPU := int64(0)
+		hasRequest := false
+
 		if r := container.Resources.Requests; r != nil {
 			if resource := r[tpuResourceName]; !resource.IsZero() {
-				tpuRequest = resource.Value()
+				containerTPU = resource.Value()
+				hasRequest = true
 			}
-		} else {
-			// default to limit if request is ommitted
-			tpuRequest = tpuLimit
 		}
+		if !hasRequest {
+			// default to limit if request is omitted
+			if l := container.Resources.Limits; l != nil {
+				if resource := l[tpuResourceName]; !resource.IsZero() {
+					containerTPU = resource.Value()
+				}
+			}
+		}
+		totalTPUs += containerTPU
 	}
-	return min(tpuLimit, tpuRequest)
+	return totalTPUs
 }
 
 // getNumTPUHostsFromTopology returns number of TPU VM hosts in Pod Slice specified by gke-tpu-topology Pod nodeSelector
