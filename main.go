@@ -831,7 +831,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		container := containers[i]
 		if containerRequestingTPUs(container) {
 			path := fmt.Sprintf("/spec/containers/%d/env", i)
-			envArrayExists := len(container.Env) > 0
+			isEnvInitialized := len(container.Env) > 0
 
 			// Legacy behavior is unique TPU_WORKER_ID per TPU Pod. With Ironwood
 			// TPU and newer, worker IDs are unique per container requesting TPU.
@@ -846,10 +846,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 				// Multiple TPU multi-host replicas in the same worker group are assumed to be apart
 				// of a multi-slice configuration.
 				if val, _ := getEnvironmentVariable("MEGASCALE_SLICE_ID", container); val == "" {
-					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_SLICE_ID",
 						Value: fmt.Sprint(replicaIndex),
-					}, path, envArrayExists || len(patches) > 0)
+					}, path, isEnvInitialized)
 				}
 
 				// Set MEGASCALE_COORDINATOR_ADDRESS, the address of worker 0 of slice 0.
@@ -859,10 +859,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 						// Target container 0's port
 						coordAddress = fmt.Sprintf("%s:%d", coordAddress, megascalePortBase)
 					}
-					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_COORDINATOR_ADDRESS",
 						Value: coordAddress,
-					}, path, true)
+					}, path, isEnvInitialized)
 				}
 
 				// Set MEGASCALE_PORT, defaulting to 8081 since 8080 is used by Ray for metrics.
@@ -871,10 +871,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 					megascalePort = fmt.Sprint(megascalePortBase + tpuContainerIndex)
 				}
 				if val, _ := getEnvironmentVariable("MEGASCALE_PORT", container); val == "" {
-					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_PORT",
 						Value: megascalePort,
-					}, path, true)
+					}, path, isEnvInitialized)
 				}
 			}
 			// Network addressing injection logic.
@@ -895,11 +895,11 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 							return nil, err
 						}
 						klog.V(1).InfoS("mutatePod v7x", "RayCluster", namespace+"/"+clusterName, "TPU_PROCESS_ADDRESSES", processAddresses)
-						patches, _ = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_ADDRESSES", Value: processAddresses}, path, true)
+						patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_ADDRESSES", Value: processAddresses}, path, isEnvInitialized)
 					}
 
 					if val, _ := getEnvironmentVariable("TPU_PROCESS_PORT", container); val == "" {
-						patches, _ = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, true)
+						patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, isEnvInitialized)
 					}
 				}
 			}
