@@ -71,15 +71,18 @@ type TPUWebhookServer struct {
 // patch is a JSON patch describing mutate operation(s) for an incoming object.
 type patch map[string]any
 
-var (
-	certPath        = "/etc/kuberay-tpu-webhook/tls/tls.crt"
-	keyPath         = "/etc/kuberay-tpu-webhook/tls/tls.key"
-	tpuResourceName = corev1.ResourceName("google.com/tpu")
+const (
+	// TLS Certificate related constants.
+	certPath = "/etc/kuberay-tpu-webhook/tls/tls.crt"
+	keyPath  = "/etc/kuberay-tpu-webhook/tls/tls.key"
 
 	// TPU related constants.
 	tpuProcessPortBase = 8471
 	megascalePortBase  = 8081
+	tpuResourceName    = corev1.ResourceName("google.com/tpu")
+)
 
+var (
 	// Flag arguments.
 	BindAddr       string
 	KubeConfigPath string
