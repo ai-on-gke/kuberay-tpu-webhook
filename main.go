@@ -72,7 +72,7 @@ type TPUWebhookServer struct {
 type patch map[string]any
 
 const (
-	// TLS Certificate related constants.
+	// TLS certificate related constants.
 	certPath = "/etc/kuberay-tpu-webhook/tls/tls.crt"
 	keyPath  = "/etc/kuberay-tpu-webhook/tls/tls.key"
 
@@ -634,11 +634,9 @@ func (t *TPUWebhookServer) getSliceToTPUHosts(clusterName string, groupName stri
 
 			tpuWorkerIDEnvVar, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 			if tpuWorkerIDEnvVar == "" {
-				if existingPod.Status.Phase == "Running" {
-					return nil, errors.New("existing TPU worker missing TPU_WORKER_ID")
-				}
-				// If the container has not yet been admitted, skip it.
-				continue
+				// If the container has been admitted without a TPU_WORKER_ID, return
+				// an error as this will cause the TPU slice to fail JAX initialization.
+				return nil, errors.New("existing TPU worker missing TPU_WORKER_ID")
 			}
 			foundWorkerID, err := strconv.Atoi(tpuWorkerIDEnvVar)
 			if err != nil {
