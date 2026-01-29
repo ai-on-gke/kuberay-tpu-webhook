@@ -29,9 +29,9 @@ row's KubeRay version.
 Pre-built container images are hosted at
 [us-docker.pkg.dev/ai-on-gke/kuberay-tpu-webhook/tpu-webhook][1] and have a `-gke.X` suffix.
 
-## Manually Installing the TPU Initialization Webhook
+## Install the KubeRay TPU Webhook
 
-The TPU Initialization Webhook automatically bootstraps the TPU environment for TPU clusters. The webhook needs to be installed once per GKE cluster and requires a KubeRay Operator running v1.1+ and GKE cluster version of 1.28+. The webhook requires [cert-manager](https://github.com/cert-manager/cert-manager) to be installed in-cluster to handle TLS certificate injection. cert-manager can be installed in both GKE standard and autopilot clusters using the following helm commands:
+The KubeRay TPU Webhook automatically bootstraps the TPU environment for TPU clusters. The webhook needs to be installed once per GKE cluster and requires a KubeRay Operator running v1.1+ and GKE cluster version of 1.28+. The webhook requires [cert-manager](https://github.com/cert-manager/cert-manager) to be installed in-cluster to handle TLS certificate injection. cert-manager can be installed in both GKE standard and autopilot clusters using the following helm commands:
 
 ```shell
 helm repo add jetstack https://charts.jetstack.io
@@ -41,7 +41,24 @@ helm install --create-namespace --namespace cert-manager --set installCRDs=true 
 
 After installing cert-manager, it may take up to two minutes for the certificate to become ready.
 
+Ensure you are authenticated to use artifact registry:
+```shell
+gcloud auth login
+gcloud auth configure-docker us-docker.pkg.dev
+```
+
 Installing the webhook:
+```shell
+helm install kuberay-tpu-webhook oci://us-docker.pkg.dev/ai-on-gke/kuberay-tpu-webhook-helm/kuberay-tpu-webhook
+```
+
+The above command can be edited with `-f` or `--set` flags to pass in a custom values file or key-value pair respectively for the chart (i.e. `--set tpuWebhook.image.tag=v1.2.3-gke.0`).
+
+For common errors encountered when deploying the webhook, see the [Troubleshooting guide](https://github.com/ai-on-gke/kuberay-tpu-webhook/tree/main/Troubleshooting.md).
+
+## Install the KubeRay TPU Webhook from Source
+
+To install the KubeRay TPU webhook from source:
 
 1. `git clone https://github.com/ai-on-gke/kuberay-tpu-webhook`
 1. `cd kuberay-tpu-webhook`
@@ -49,17 +66,6 @@ Installing the webhook:
     1. this will create the webhook deployment, configs, and service in the "ray-system" namespace
     1. to change the namespace, edit the "namespace" value in each .yaml in deployments/ and certs/
 1. `make deploy-cert`
-
-The webhook can also be installed using the [Helm chart](https://github.com/ai-on-gke/kuberay-tpu-webhook/tree/main/helm-chart), enabling users to easily edit the webhook configuration. This helm package is stored on Artifact Registry and can be installed with the following commands:
-
-1. Ensure you are authenticated with gcloud:
-    1. `gcloud auth login`
-    1. `gcloud auth configure-docker us-docker.pkg.dev`
-1. `helm install kuberay-tpu-webhook oci://us-docker.pkg.dev/ai-on-gke/kuberay-tpu-webhook-helm/kuberay-tpu-webhook`
-
-The above command can be edited with `-f` or `--set` flags to pass in a custom values file or key-value pair respectively for the chart (i.e. `--set tpuWebhook.image.tag=v1.2.3-gke.0`).
-
-For common errors encountered when deploying the webhook, see the [Troubleshooting guide](https://github.com/ai-on-gke/kuberay-tpu-webhook/tree/main/Troubleshooting.md).
 
 ## Creating the KubeRay Cluster
 
