@@ -80,6 +80,7 @@ const (
 	tpuProcessPortBase = 8471
 	megascalePortBase  = 8081
 	tpuResourceName    = corev1.ResourceName("google.com/tpu")
+	tpu7xType          = "tpu7x"
 )
 
 var (
@@ -751,7 +752,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 	// Detect v7x TPU accelerator
 	isV7x := false
-	if selector, ok := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]; ok && strings.HasPrefix(selector, "tpu7x") {
+	if selector, ok := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]; ok && strings.HasPrefix(selector, tpu7xType) {
 		isV7x = true
 	}
 
@@ -842,8 +843,8 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			path := fmt.Sprintf("/spec/containers/%d/env", i)
 			isEnvInitialized := len(container.Env) > 0
 
-			// Legacy behavior is unique TPU_WORKER_ID per TPU Pod. With Ironwood
-			// TPU and newer, worker IDs are unique per container requesting TPU.
+			// For TPU generations up until v6e, TPU_WORKER_ID was indexed per TPU Pod.
+			// With Ironwood TPU and newer, worker IDs are unique per container requesting TPU.
 			finalWorkerID := tpuWorkerID
 			if isV7x {
 				finalWorkerID = (tpuWorkerID * numTpuContainers) + tpuContainerIndex
