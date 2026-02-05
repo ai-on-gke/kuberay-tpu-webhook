@@ -283,9 +283,9 @@ func genDNSHostnames(numOfHosts int32, groupName string, clusterName string, nam
 	return strings.Join(hostNames, ","), nil
 }
 
-// getTPUProcessAdresses returns the list of process addresses (host:port) for all containers in the slice.
+// getTPUProcessAddresses returns the list of process addresses (host:port) for all containers in the slice.
 // The base port is 8476. TPU_PROCESS_ADDRESSES replaces TPU_WORKER_HOSTNAMES for Ironwood (v7x) TPUs and newer.
-func getTPUProcessAdresses(numOfHosts int32, numTpuContainers int, groupName, clusterName string, replicaIndex int) (string, error) {
+func getTPUProcessAddresses(numOfHosts int32, numTpuContainers int, groupName, clusterName string, replicaIndex int) (string, error) {
 	if numOfHosts == 0 {
 		return "", errors.New("workerGroupSpec NumOfHosts not set")
 	}
@@ -906,7 +906,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 					val, _ := getEnvironmentVariable("TPU_PROCESS_ADDRESSES", container)
 					if val == "" || strings.Contains(val, "localhost") {
 						// Inject value if unset or set to default value.
-						processAddresses, err := getTPUProcessAdresses(numOfHosts, numTpuContainers, groupName, clusterName, replicaIndex)
+						processAddresses, err := getTPUProcessAddresses(numOfHosts, numTpuContainers, groupName, clusterName, replicaIndex)
 						if err != nil {
 							return nil, err
 						}

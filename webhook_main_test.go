@@ -1851,7 +1851,7 @@ func TestWebhookCertReloadsOnChange(t *testing.T) {
 	t.Logf("Server successfully reloaded the certificate with cert-watcher.")
 }
 
-func Test_GetTPUProcessAdresses(t *testing.T) {
+func Test_GetTPUProcessAddresses(t *testing.T) {
 	tests := map[string]struct {
 		numOfHosts       int32
 		numTpuContainers int
@@ -1860,7 +1860,7 @@ func Test_GetTPUProcessAdresses(t *testing.T) {
 		expected         string
 		expectedError    error
 	}{
-		"getTPUProcessAdresses with NumOfHosts == 0": {
+		"getTPUProcessAddresses with NumOfHosts == 0": {
 			// Invalid case - NumOfHosts can't be 0.
 			numOfHosts:       0,
 			numTpuContainers: 2,
@@ -1868,7 +1868,7 @@ func Test_GetTPUProcessAdresses(t *testing.T) {
 			replicaIndex:     0,
 			expectedError:    errors.New("workerGroupSpec NumOfHosts not set"),
 		},
-		"getTPUProcessAdresses single host, multi-container": {
+		"getTPUProcessAddresses single host, multi-container": {
 			// 1 host, 2 containers -> generates 2 ports on host 0.
 			numOfHosts:       1,
 			numTpuContainers: 2,
@@ -1879,7 +1879,7 @@ func Test_GetTPUProcessAdresses(t *testing.T) {
 				fmt.Sprintf("test-group-0-0.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
 			}, ","),
 		},
-		"getTPUProcessAdresses multi-host, multi-container.": {
+		"getTPUProcessAddresses multi-host, multi-container.": {
 			// 2 hosts, 2 containers -> generates 4 addresses.
 			numOfHosts:       2,
 			numTpuContainers: 2,
@@ -1896,7 +1896,7 @@ func Test_GetTPUProcessAdresses(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			actual, err := getTPUProcessAdresses(tc.numOfHosts, tc.numTpuContainers, "test-group", tc.clusterName, tc.replicaIndex)
+			actual, err := getTPUProcessAddresses(tc.numOfHosts, tc.numTpuContainers, "test-group", tc.clusterName, tc.replicaIndex)
 
 			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
