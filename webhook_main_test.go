@@ -413,36 +413,36 @@ func setupInformer(pods ...*corev1.Pod) listersv1.PodLister {
 
 func Test_GetReplicaIndex(t *testing.T) {
 	tests := map[string]struct {
-		sliceToWorkerIDs     map[slice][]int
+		sliceToTPUHosts      map[slice][]int
 		expectedReplicaIndex int
 	}{
-		"nil sliceToWorkerIDs": {
+		"nil sliceToTPUHosts": {
 			// defaults to assigning Pod to replica 0
-			sliceToWorkerIDs:     nil,
+			sliceToTPUHosts:      nil,
 			expectedReplicaIndex: 0,
 		},
-		"empty sliceToWorkerIDs": {
+		"empty sliceToTPUHosts": {
 			// should assign Pod to replica 0 since no other Pods in slice
-			sliceToWorkerIDs:     make(map[slice][]int),
+			sliceToTPUHosts:      make(map[slice][]int),
 			expectedReplicaIndex: 0,
 		},
 		"single-host worker group missing worker": {
 			// should assign Pod to replica 0 since # workers < 1 for that slice
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(1)}: []int{},
 			},
 			expectedReplicaIndex: 0,
 		},
 		"single-host worker group with all workers created": {
 			// should assign Pod to replica 1 since one existing slice with all workers created
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(1)}: []int{0},
 			},
 			expectedReplicaIndex: 1,
 		},
 		"multi-host worker group missing worker": {
 			// should assign Pod to replica 0 since # workers < 4 for that slice
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2},
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 2, 3},
 			},
@@ -450,14 +450,14 @@ func Test_GetReplicaIndex(t *testing.T) {
 		},
 		"multi-host worker group with all workers created": {
 			// should assign Pod to replica 1 since one existing slice with all workers created
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
 			},
 			expectedReplicaIndex: 1,
 		},
 		"multi-slice worker group": {
 			// should assign Pod to replica 4 since 3 existing slices with all workers created
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 2, int32(4)}: []int{0, 1, 2, 3},
@@ -469,7 +469,7 @@ func Test_GetReplicaIndex(t *testing.T) {
 	// validate getReplicaIndex() returns the expected Replica ID for TPU pods in varying pod slices
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			replicaIndex := getReplicaIndex(tc.sliceToWorkerIDs, "test-cluster", "test-group", "test-namespace")
+			replicaIndex := getReplicaIndex(tc.sliceToTPUHosts, "test-cluster", "test-group", "test-namespace")
 			assert.Equal(t, tc.expectedReplicaIndex, replicaIndex)
 		})
 	}
@@ -477,29 +477,29 @@ func Test_GetReplicaIndex(t *testing.T) {
 
 func Test_GetNextWorkerID(t *testing.T) {
 	tests := map[string]struct {
-		sliceToWorkerIDs    map[slice][]int
+		sliceToTPUHosts     map[slice][]int
 		podSlice            slice
 		replicaIndex        int
 		expectedError       error
 		expectedTPUWorkerID int
 	}{
-		"nil sliceToWorkerIDs": {
+		"nil sliceToTPUHosts": {
 			// defaults to assigning Pod to TPU_WORKER_ID=0
-			sliceToWorkerIDs:    nil,
+			sliceToTPUHosts:     nil,
 			podSlice:            slice{"test-cluster", "test-group", "test-namespace", 0, int32(1)},
 			replicaIndex:        0,
 			expectedTPUWorkerID: 0,
 		},
-		"empty sliceToWorkerIDs": {
+		"empty sliceToTPUHosts": {
 			// should assign Pod to TPU_WORKER_ID=0 since no other Pods in slice
-			sliceToWorkerIDs:    make(map[slice][]int),
+			sliceToTPUHosts:     make(map[slice][]int),
 			podSlice:            slice{"test-cluster", "test-group", "test-namespace", 0, int32(1)},
 			replicaIndex:        0,
 			expectedTPUWorkerID: 0,
 		},
 		"single-host worker group with empty worker ID list": {
 			// should assign Pod to TPU_WORKER_ID=0 since # workers < 1 for that slice
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(1)}: []int{},
 			},
 			podSlice:            slice{"test-cluster", "test-group", "test-namespace", 0, int32(1)},
@@ -508,7 +508,7 @@ func Test_GetNextWorkerID(t *testing.T) {
 		},
 		"multi-host worker group with deleted worker": {
 			// should assign Pod to TPU_WORKER_ID=2 since that's the next lowest int ID in the slice
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{3, 0, 1},
 			},
 			podSlice:            slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)},
@@ -517,7 +517,7 @@ func Test_GetNextWorkerID(t *testing.T) {
 		},
 		"multi-host worker group with # worker IDs < NumOfHosts": {
 			// should assign Pod to TPU_WORKER_ID=3 since that's the next lowest int ID in the slice
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 2},
 			},
@@ -527,7 +527,7 @@ func Test_GetNextWorkerID(t *testing.T) {
 		},
 		"multi-host worker group with incorrectly assigned worker IDs": {
 			// should error since two or more Pods in a slice have identical TPU_WORKER_IDs
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 1},
 			},
@@ -537,7 +537,7 @@ func Test_GetNextWorkerID(t *testing.T) {
 		},
 		"multi-slice worker group with all workers created": {
 			// should always assign Pod to TPU_WORKER_ID=0 in a new slice
-			sliceToWorkerIDs: map[slice][]int{
+			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 2, int32(4)}: []int{0, 1, 2, 3},
@@ -548,10 +548,10 @@ func Test_GetNextWorkerID(t *testing.T) {
 		},
 	}
 
-	// validate getNextWorkerID() returns the expected TPU_WORKER ID for different sliceToWorkerIDs
+	// validate getNextWorkerID() returns the expected TPU_WORKER ID for different sliceToTPUHosts
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			workerID, err := getNextWorkerID(tc.sliceToWorkerIDs, tc.podSlice, "test-namespace", tc.replicaIndex)
+			workerID, err := getNextWorkerID(tc.sliceToTPUHosts, tc.podSlice, "test-namespace", tc.replicaIndex)
 			if err != nil {
 				assert.Equal(t, tc.expectedError, err)
 			}
@@ -653,64 +653,73 @@ func Test_GetNumTPUHostsFromTopology(t *testing.T) {
 }
 
 func Test_GetNumTPUChipsRequested(t *testing.T) {
+	// Helper to create a container with specific TPU request/limit.
+	makeContainer := func(name string, req, lim string) corev1.Container {
+		c := corev1.Container{Name: name, Resources: corev1.ResourceRequirements{}}
+		if req != "" {
+			c.Resources.Requests = corev1.ResourceList{"google.com/tpu": resource.MustParse(req)}
+		}
+		if lim != "" {
+			c.Resources.Limits = corev1.ResourceList{"google.com/tpu": resource.MustParse(lim)}
+		}
+		return c
+	}
+
 	tests := map[string]struct {
-		testPod            *corev1.Pod
-		expectedTPULimit   map[corev1.ResourceName]resource.Quantity
-		expectedTPURequest map[corev1.ResourceName]resource.Quantity
-		expectedNumChips   int64
+		containers       []corev1.Container
+		expectedNumChips int64
 	}{
-		"getNumTPUChipsRequested no TPUs requested": {
+		"Single container, no TPUs": {
 			// doesn't request TPUs - returns 0
-			testPod:            getTestCPUWorker("test-cluster", "test-group", "test-namespace"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("0")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("0")},
-			expectedNumChips:   int64(0),
+			containers: []corev1.Container{
+				makeContainer("c1", "0", "0"),
+			},
+			expectedNumChips: 0,
 		},
-		"getNumTPUChipsRequested only TPU limit resource set": {
+		"Single container, explicit Request": {
+			// includes standard TPU request of 4 chips
+			containers: []corev1.Container{
+				makeContainer("c1", "4", "4"),
+			},
+			expectedNumChips: 4,
+		},
+		"Single container, only TPU limit specified": {
 			// includes TPU limits but omits request - defaults to limit value
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedTPURequest: nil,
-			expectedNumChips:   int64(4),
+			containers: []corev1.Container{
+				makeContainer("c1", "", "4"),
+			},
+			expectedNumChips: 4,
 		},
-		"getNumTPUChipsRequested with TPU Request > TPU Limit": {
-			// TPU Limit = maximum number of TPU chips requested
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("8")},
-			expectedNumChips:   int64(4),
+		"Multiple containers with TPU requests": {
+			containers: []corev1.Container{
+				makeContainer("c1", "2", "2"),
+				makeContainer("c2", "2", "2"),
+			},
+			expectedNumChips: 4,
 		},
-		"getNumTPUChipsRequested with v4 TPU request": {
-			// v4 - always 4 chips per VM
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("4")},
-			expectedNumChips:   int64(4),
+		"Multiple containers with TPU limits": {
+			containers: []corev1.Container{
+				makeContainer("c1", "1", "4"), // Request takes precedence over limit
+				makeContainer("c2", "", "2"),  // Request defaults to limit
+			},
+			expectedNumChips: 3,
 		},
-		"getNumTPUChipsRequested with v5e ct5lp-hightpu-1t TPU request": {
-			// v5e - 1x1 and 1 chip per VM
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v5-lite-podslice", "1x1", "1"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("1")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("1")},
-			expectedNumChips:   int64(1),
-		},
-		"getNumTPUChipsRequested with v5e ct5lp-hightpu-8t TPU request": {
-			// v5e - 2x4 and 8 chips per VM
-			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v5-lite-podslice", "2x4", "8"),
-			expectedTPULimit:   map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("8")},
-			expectedTPURequest: map[corev1.ResourceName]resource.Quantity{"google.com/tpu": resource.MustParse("8")},
-			expectedNumChips:   int64(8),
+		"Multiple containers with TPU and non-TPU": {
+			containers: []corev1.Container{
+				makeContainer("c1", "4", "4"),
+				{Name: "sidecar", Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{"cpu": resource.MustParse("1")},
+				}},
+			},
+			expectedNumChips: 4,
 		},
 	}
 
 	// validate that getNumTPUChipsRequested correctly returns the number of TPU chips requested per Pod container
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			container := tc.testPod.Spec.Containers[0]
-			container.Resources.Limits = tc.expectedTPULimit
-			container.Resources.Requests = tc.expectedTPURequest
-			chipsPerHost := getNumTPUChipsRequested(container)
-			assert.Equal(t, tc.expectedNumChips, chipsPerHost)
+			chips := getNumTPUChipsRequested(tc.containers...)
+			assert.Equal(t, tc.expectedNumChips, chips)
 		})
 	}
 }
@@ -863,15 +872,13 @@ func Test_InjectHostnames(t *testing.T) {
 	tests := map[string]struct {
 		clusterName       string
 		groupName         string
-		expectedSubdomain string
 		expectedHostnames string
 	}{
 		"injectHostnames for multi-host worker group": {
-			// Should create a patch to set the subdomain and TPU_WORKER_HOSTNAMES for all hosts.
+			// Should create a patch to set TPU_WORKER_HOSTNAMES for all hosts.
 			// This function is only called for multi-host TPU worker groups.
-			clusterName:       "test-cluster",
-			groupName:         "test-group-name",
-			expectedSubdomain: fmt.Sprintf("%s-%s", "test-cluster", utils.HeadlessServiceSuffix),
+			clusterName: "test-cluster",
+			groupName:   "test-group-name",
 			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 1, "test-cluster", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 2, "test-cluster", utils.HeadlessServiceSuffix),
@@ -879,11 +886,10 @@ func Test_InjectHostnames(t *testing.T) {
 			}, ","),
 		},
 		"injectHostnames for multi-host worker group with truncated service name": {
-			// Should create a patch to set the subdomain and TPU_WORKER_HOSTNAMES for all hosts, with the
+			// Should create a patch to set the TPU_WORKER_HOSTNAMES for all hosts, with the
 			// correct subdomain truncated to match the created service name.
-			clusterName:       "really-really-extremely-long-test-raycluster-name",
-			groupName:         "test-group-name",
-			expectedSubdomain: fmt.Sprintf("%s-%s", "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
+			clusterName: "really-really-extremely-long-test-raycluster-name",
+			groupName:   "test-group-name",
 			expectedHostnames: strings.Join([]string{fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 0, "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 1, "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
 				fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 1, 2, "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
@@ -892,19 +898,44 @@ func Test_InjectHostnames(t *testing.T) {
 		},
 	}
 
-	// check that a valid subdomain and TPU_WORKER_HOSTNAMES are injected into the Pod
+	// check that valid TPU_WORKER_HOSTNAMES are injected into the Pod
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			testPod := getTestTPUWorker(tc.clusterName, tc.groupName, "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
 			expectedEnv := []corev1.EnvVar{corev1.EnvVar{Name: "TPU_WORKER_HOSTNAMES", Value: tc.expectedHostnames}}
 			patches := []patch{}
-			injectHostnames(tc.clusterName, tc.expectedHostnames, "/spec/containers/0/env", testPod.Spec.Containers[0], &patches)
-			// check subdomain patch
+			injectHostnames(tc.clusterName, tc.expectedHostnames, "/spec/containers/0/env", testPod.Spec.Containers[0], &patches, false)
+			// check hostnames patch
+			assert.Equal(t, "/spec/containers/0/env", patches[0]["path"])
+			assert.Equal(t, expectedEnv, patches[0]["value"])
+		})
+	}
+}
+
+func Test_InjectSubdomain(t *testing.T) {
+	tests := map[string]struct {
+		clusterName       string
+		expectedSubdomain string
+	}{
+		"injectSubdomain sets correct headless service name": {
+			clusterName:       "test-cluster",
+			expectedSubdomain: fmt.Sprintf("%s-%s", "test-cluster", utils.HeadlessServiceSuffix),
+		},
+		"injectSubdomain handles truncated service name": {
+			clusterName:       "really-really-extremely-long-test-raycluster-name",
+			expectedSubdomain: fmt.Sprintf("%s-%s", "eally-extremely-long-test-raycluster-name", utils.HeadlessServiceSuffix),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			patches := []patch{}
+			injectSubdomain(tc.clusterName, &patches)
+
+			// verify that the subdomain is injected correctly
+			assert.Len(t, patches, 1)
 			assert.Equal(t, "/spec/subdomain", patches[0]["path"])
 			assert.Equal(t, tc.expectedSubdomain, patches[0]["value"])
-			// check hostnames patch
-			assert.Equal(t, "/spec/containers/0/env", patches[1]["path"])
-			assert.Equal(t, expectedEnv, patches[1]["value"])
 		})
 	}
 }
@@ -1271,7 +1302,7 @@ func Test_GetEnvironmentVariable(t *testing.T) {
 	}
 }
 
-func Test_GetSliceToWorkerIDs(t *testing.T) {
+func Test_getSliceToTPUHosts(t *testing.T) {
 	testCPUWorker := getTestCPUWorker("test-cluster", "test-group", "test-namespace")
 	testTPUWorker := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
 	expectedIds := make([]int, 64)
@@ -1280,30 +1311,30 @@ func Test_GetSliceToWorkerIDs(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		numOfHosts               int32
-		numReplicas              int
-		podsInGroup              []*corev1.Pod
-		expectedSliceToWorkerIDs map[slice][]int
+		numOfHosts              int32
+		numReplicas             int
+		podsInGroup             []*corev1.Pod
+		expectedsliceToTPUHosts map[slice][]int
 	}{
-		"getSliceToWorkerIDs with nil Pod list": {
+		"getSliceToTPUHosts with nil Pod list": {
 			// this can occur when no Pods with the Ray group name have been cached
 			// should return an empty mapping
-			podsInGroup:              nil,
-			expectedSliceToWorkerIDs: make(map[slice][]int),
+			podsInGroup:             nil,
+			expectedsliceToTPUHosts: make(map[slice][]int),
 		},
-		"getSliceToWorkerIDs for with CPU pod list": {
-			// sliceToWorkerIDs should return an empty mapping
-			numOfHosts:               int32(1),
-			numReplicas:              4,
-			podsInGroup:              getTestPods(testCPUWorker, "test-cluster", "test-namespace", 4),
-			expectedSliceToWorkerIDs: make(map[slice][]int),
+		"getSliceToTPUHosts for with CPU pod list": {
+			// sliceToTPUHosts should return an empty mapping
+			numOfHosts:              int32(1),
+			numReplicas:             4,
+			podsInGroup:             getTestPods(testCPUWorker, "test-cluster", "test-namespace", 4),
+			expectedsliceToTPUHosts: make(map[slice][]int),
 		},
-		"getSliceToWorkerIDs for with TPU pod list": {
-			// sliceToWorkerIDs should be populated with TPU worker IDs
+		"getSliceToTPUHosts for with TPU pod list": {
+			// sliceToTPUHosts should be populated with TPU worker IDs
 			numOfHosts:  int32(64),
 			numReplicas: 2,
 			podsInGroup: getTestInterceptedTPUPods(testTPUWorker, 128, 2, 64),
-			expectedSliceToWorkerIDs: map[slice][]int{
+			expectedsliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(64)}: expectedIds,
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(64)}: expectedIds,
 			},
@@ -1314,16 +1345,16 @@ func Test_GetSliceToWorkerIDs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			podLister := setupInformer(tc.podsInGroup...)
 			tpuWebhook := NewTPUWebhookServer(podLister)
-			sliceToWorkerIDs, err := tpuWebhook.getSliceToWorkerIDs("test-cluster", "test-group", "test-namespace", tc.numOfHosts)
+			sliceToTPUHosts, err := tpuWebhook.getSliceToTPUHosts("test-cluster", "test-group", "test-namespace", tc.numOfHosts)
 
-			// sliceToWorkerIDs should be populated with slices and unique TPU_WORKER_IDs for each Pod
+			// sliceToTPUHosts should be populated with slices and unique TPU_WORKER_IDs for each Pod
 			assert.Equal(t, err, nil)
-			for slice, workerIDs := range sliceToWorkerIDs {
-				assert.Contains(t, tc.expectedSliceToWorkerIDs, slice)
-				assert.Equal(t, len(tc.expectedSliceToWorkerIDs[slice]), len(workerIDs))
+			for slice, workerIDs := range sliceToTPUHosts {
+				assert.Contains(t, tc.expectedsliceToTPUHosts, slice)
+				assert.Equal(t, len(tc.expectedsliceToTPUHosts[slice]), len(workerIDs))
 				sort.Ints(workerIDs)
 				for index, value := range workerIDs {
-					assert.Equal(t, tc.expectedSliceToWorkerIDs[slice][index], value)
+					assert.Equal(t, tc.expectedsliceToTPUHosts[slice][index], value)
 				}
 			}
 		})
@@ -1818,4 +1849,205 @@ func TestWebhookCertReloadsOnChange(t *testing.T) {
 	// Final check to ensure the new cert is different from the old one.
 	assert.NotEqual(t, initialCert.SerialNumber, reloadedCert.SerialNumber, "Certificate was not reloaded; serial number is unchanged.")
 	t.Logf("Server successfully reloaded the certificate with cert-watcher.")
+}
+
+func Test_GetTPUProcessAddresses(t *testing.T) {
+	tests := map[string]struct {
+		numOfHosts       int32
+		numTpuContainers int
+		clusterName      string
+		replicaIndex     int
+		expected         string
+		expectedError    error
+	}{
+		"getTPUProcessAddresses with NumOfHosts == 0": {
+			// Invalid case - NumOfHosts can't be 0.
+			numOfHosts:       0,
+			numTpuContainers: 2,
+			clusterName:      "test-cluster",
+			replicaIndex:     0,
+			expectedError:    errors.New("workerGroupSpec NumOfHosts not set"),
+		},
+		"getTPUProcessAddresses single host, multi-container": {
+			// 1 host, 2 containers -> generates 2 ports on host 0.
+			numOfHosts:       1,
+			numTpuContainers: 2,
+			clusterName:      "test-cluster",
+			replicaIndex:     0,
+			expected: strings.Join([]string{
+				fmt.Sprintf("test-group-0-0.test-cluster-%s:8471", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-0-0.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
+			}, ","),
+		},
+		"getTPUProcessAddresses multi-host, multi-container.": {
+			// 2 hosts, 2 containers -> generates 4 addresses.
+			numOfHosts:       2,
+			numTpuContainers: 2,
+			clusterName:      "test-cluster",
+			replicaIndex:     1,
+			expected: strings.Join([]string{
+				fmt.Sprintf("test-group-1-0.test-cluster-%s:8471", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-0.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-1.test-cluster-%s:8471", utils.HeadlessServiceSuffix),
+				fmt.Sprintf("test-group-1-1.test-cluster-%s:8472", utils.HeadlessServiceSuffix),
+			}, ","),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			actual, err := getTPUProcessAddresses(tc.numOfHosts, tc.numTpuContainers, "test-group", tc.clusterName, tc.replicaIndex)
+
+			if tc.expectedError != nil {
+				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expected, actual)
+			}
+		})
+	}
+}
+
+func Test_MutatePod_V7x(t *testing.T) {
+	tests := map[string]struct {
+		numOfHosts              int32
+		customEnv               []corev1.EnvVar
+		expectedWorkerID        string
+		expectedPort            string
+		expectedLogDir          string
+		expectedMegascalePort   string
+		expectedMegascaleCoord  string
+		expectPatchForAddresses bool
+		expectPatchForPort      bool
+		isMultiSlice            bool
+	}{
+		"v7x standard multi-container injection": {
+			numOfHosts:              2,
+			customEnv:               nil,
+			expectedWorkerID:        "1",
+			expectedPort:            "8472", // Base port + 1
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
+			expectPatchForAddresses: true,
+			expectPatchForPort:      true,
+			isMultiSlice:            false,
+		},
+		"v7x respects user-defined ports and addresses": {
+			numOfHosts: 2,
+			customEnv: []corev1.EnvVar{
+				{Name: "TPU_PROCESS_PORT", Value: "9999"},
+				{Name: "TPU_PROCESS_ADDRESSES", Value: "custom-mesh:9999"},
+			},
+			expectedWorkerID:        "1",
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
+			expectPatchForAddresses: false,
+			expectPatchForPort:      false,
+			isMultiSlice:            false,
+		},
+		"v7x megascale multi-slice coordination": {
+			numOfHosts: 2,
+			customEnv: []corev1.EnvVar{
+				{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
+			},
+			expectedWorkerID:        "1",
+			expectedPort:            "8472",
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
+			expectedMegascalePort:   "8082", // Base port + 1
+			expectedMegascaleCoord:  fmt.Sprintf("test-group-0-0.test-cluster-%s:8081", utils.HeadlessServiceSuffix),
+			expectPatchForAddresses: true,
+			expectPatchForPort:      true,
+			isMultiSlice:            true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			inputPod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x-standard-4t", "2x2x2", "2")
+
+			// Add user-specified env vars
+			if tc.customEnv != nil {
+				inputPod.Spec.Containers[0].Env = append(inputPod.Spec.Containers[0].Env, tc.customEnv...)
+			}
+
+			// Add a second container that requests TPU.
+			secondContainer := inputPod.Spec.Containers[0].DeepCopy()
+			secondContainer.Name = "ray-worker-2"
+			inputPod.Spec.Containers = append(inputPod.Spec.Containers, *secondContainer)
+
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(inputPod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object.Object = inputPod
+
+			testPodLister := setupInformer()
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
+
+			// Validate Pod mutation for a Ironwood (v7x) TPU Pod contains the expected patches.
+			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+			assert.NoError(t, err)
+
+			var patches []patch
+			json.Unmarshal(admissionResponse.Patch, &patches)
+
+			// Helper to find Env Var patches per container
+			findContainerEnvPatch := func(name string) map[string]interface{} {
+				for _, p := range patches {
+					if p["path"] == "/spec/containers/1/env" || p["path"] == "/spec/containers/1/env/-" {
+						if valList, ok := p["value"].([]interface{}); ok {
+							for _, v := range valList {
+								if vMap, ok := v.(map[string]interface{}); ok {
+									if vMap["name"] == name {
+										return vMap
+									}
+								}
+							}
+						}
+						if valMap, ok := p["value"].(map[string]interface{}); ok {
+							if valMap["name"] == name {
+								return valMap
+							}
+						}
+					}
+				}
+				return nil
+			}
+
+			// Check TPU_WORKER_ID, should be unique per container in the slice.
+			workerIDMap := findContainerEnvPatch("TPU_WORKER_ID")
+			assert.NotNil(t, workerIDMap, "TPU_WORKER_ID patch missing")
+			assert.Equal(t, tc.expectedWorkerID, workerIDMap["value"])
+
+			// Check TPU_NAME, this is a unique ID for the TPU slice.
+			tpuNameMap := findContainerEnvPatch("TPU_NAME")
+			assert.NotNil(t, tpuNameMap, "TPU_NAME patch missing")
+			assert.Equal(t, "test-group-0", tpuNameMap["value"])
+
+			// Check networking related fields and env vars
+			addressMap := findContainerEnvPatch("TPU_PROCESS_ADDRESSES")
+			if tc.expectPatchForAddresses {
+				assert.NotNil(t, addressMap, "Expected TPU_PROCESS_ADDRESSES patch")
+				assert.Contains(t, addressMap["value"].(string), "test-group-0-0")
+			} else {
+				assert.Nil(t, addressMap, "Webhook overwrote user-defined TPU_PROCESS_ADDRESSES")
+			}
+
+			portMap := findContainerEnvPatch("TPU_PROCESS_PORT")
+			if tc.expectPatchForPort {
+				assert.NotNil(t, portMap, "Expected TPU_PROCESS_PORT patch")
+				assert.Equal(t, tc.expectedPort, portMap["value"])
+			} else {
+				assert.Nil(t, portMap, "Webhook overwrote user-defined TPU_PROCESS_PORT")
+			}
+
+			// Validate Megascale / multi-slice logic
+			if tc.isMultiSlice {
+				megascalePortMap := findContainerEnvPatch("MEGASCALE_PORT")
+				assert.NotNil(t, megascalePortMap, "MEGASCALE_PORT patch missing")
+				assert.Equal(t, tc.expectedMegascalePort, megascalePortMap["value"])
+
+				coordMap := findContainerEnvPatch("MEGASCALE_COORDINATOR_ADDRESS")
+				assert.NotNil(t, coordMap, "MEGASCALE_COORDINATOR_ADDRESS patch missing")
+				assert.Equal(t, tc.expectedMegascaleCoord, coordMap["value"])
+			}
+		})
+	}
 }

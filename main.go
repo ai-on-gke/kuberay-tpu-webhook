@@ -71,11 +71,19 @@ type TPUWebhookServer struct {
 // patch is a JSON patch describing mutate operation(s) for an incoming object.
 type patch map[string]any
 
-var (
-	certPath        = "/etc/kuberay-tpu-webhook/tls/tls.crt"
-	keyPath         = "/etc/kuberay-tpu-webhook/tls/tls.key"
-	tpuResourceName = corev1.ResourceName("google.com/tpu")
+const (
+	// TLS certificate related constants.
+	certPath = "/etc/kuberay-tpu-webhook/tls/tls.crt"
+	keyPath  = "/etc/kuberay-tpu-webhook/tls/tls.key"
 
+	// TPU related constants.
+	tpuProcessPortBase = 8471
+	megascalePortBase  = 8081
+	tpuResourceName    = corev1.ResourceName("google.com/tpu")
+	tpu7xType          = "tpu7x"
+)
+
+var (
 	// Flag arguments.
 	BindAddr       string
 	KubeConfigPath string
@@ -161,12 +169,12 @@ func (t *TPUWebhookServer) Validate(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, string(responseBytes))
 }
 
-// printSliceToWorkerIds logs sliceToWorkerIDs contents for debugging
-func printSliceToWorkerIds(sliceToWorkerIDs map[slice][]int) {
-	for slice, workerList := range sliceToWorkerIDs {
-		klog.V(1).InfoS("printSliceToWorkerIds", "RayCluster", slice.namespace+"/"+slice.clusterName, "Worker Group", slice.groupName)
+// printsliceToTPUHosts logs sliceToTPUHosts contents for debugging
+func printsliceToTPUHosts(sliceToTPUHosts map[slice][]int) {
+	for slice, workerList := range sliceToTPUHosts {
+		klog.V(1).InfoS("printsliceToTPUHosts", "RayCluster", slice.namespace+"/"+slice.clusterName, "Worker Group", slice.groupName)
 		for _, workerID := range workerList {
-			klog.V(1).InfoS("printSliceToWorkerIds", "RayCluster", slice.namespace+"/"+slice.clusterName, "Worker ID", workerID)
+			klog.V(1).InfoS("printsliceToTPUHosts", "RayCluster", slice.namespace+"/"+slice.clusterName, "Worker ID", workerID)
 		}
 	}
 }
@@ -188,27 +196,31 @@ func containerRequestingTPUs(containers ...corev1.Container) bool {
 	return false
 }
 
-// getNumTPUChipsRequested returns `google.com/TPU` Resource request value for the container
-// this indicates the number of TPU chips for the container to use
+// getNumTPUChipsRequested returns the total `google.com/TPU` Resource request value
+// summed across all containers. This indicates the total number of TPU chips the Pod requires.
 func getNumTPUChipsRequested(containers ...corev1.Container) int64 {
-	tpuLimit := int64(0)
-	tpuRequest := int64(0)
+	totalTPUs := int64(0)
 	for _, container := range containers {
-		if l := container.Resources.Limits; l != nil {
-			if resource := l[tpuResourceName]; !resource.IsZero() {
-				tpuLimit = resource.Value()
-			}
-		}
+		containerTPU := int64(0)
+		hasRequest := false
+
 		if r := container.Resources.Requests; r != nil {
 			if resource := r[tpuResourceName]; !resource.IsZero() {
-				tpuRequest = resource.Value()
+				containerTPU = resource.Value()
+				hasRequest = true
 			}
-		} else {
-			// default to limit if request is ommitted
-			tpuRequest = tpuLimit
 		}
+		if !hasRequest {
+			// default to limit if request is omitted
+			if l := container.Resources.Limits; l != nil {
+				if resource := l[tpuResourceName]; !resource.IsZero() {
+					containerTPU = resource.Value()
+				}
+			}
+		}
+		totalTPUs += containerTPU
 	}
-	return min(tpuLimit, tpuRequest)
+	return totalTPUs
 }
 
 // getNumTPUHostsFromTopology returns number of TPU VM hosts in Pod Slice specified by gke-tpu-topology Pod nodeSelector
@@ -271,25 +283,47 @@ func genDNSHostnames(numOfHosts int32, groupName string, clusterName string, nam
 	return strings.Join(hostNames, ","), nil
 }
 
-// injectHostnames injects subdomain and TPU_WORKER_HOSTNAMES into a Pod for TPU multi-host initialization
-func injectHostnames(clusterName string, hostNames string, envPath string, container corev1.Container, patches *[]patch) {
-	subdomainPatch, hostNamesPatch := patch{"op": "add"}, patch{"op": "add"}
-	subdomainPath := "/spec/subdomain"
+// getTPUProcessAddresses returns the list of process addresses (host:port) for all containers in the slice.
+// The base port is 8476. TPU_PROCESS_ADDRESSES replaces TPU_WORKER_HOSTNAMES for Ironwood (v7x) TPUs and newer.
+func getTPUProcessAddresses(numOfHosts int32, numTpuContainers int, groupName, clusterName string, replicaIndex int) (string, error) {
+	if numOfHosts == 0 {
+		return "", errors.New("workerGroupSpec NumOfHosts not set")
+	}
+	headlessServiceName := generateHeadlessServiceName(clusterName)
+	var addresses []string
+
+	for h := 0; h < int(numOfHosts); h++ {
+		hostName := fmt.Sprintf("%s-%d-%d.%s", groupName, replicaIndex, h, headlessServiceName)
+		for c := 0; c < numTpuContainers; c++ {
+			port := tpuProcessPortBase + c
+			addresses = append(addresses, fmt.Sprintf("%s:%d", hostName, port))
+		}
+	}
+	return strings.Join(addresses, ","), nil
+}
+
+// injectHostnames TPU_WORKER_HOSTNAMES into a Pod for multi-host initialization.
+func injectHostnames(clusterName string, hostNames string, envPath string, container corev1.Container, patches *[]patch, envArrayExists bool) bool {
 	tpuWorkerHostNames := corev1.EnvVar{
 		Name:  "TPU_WORKER_HOSTNAMES",
 		Value: hostNames,
 	}
-	subdomainPatch["path"] = subdomainPath
-	subdomainPatch["value"] = generateHeadlessServiceName(clusterName)
-	// create new EnvVar array if container.Env is empty, and append hostnames if not
-	if len(container.Env) == 0 {
-		hostNamesPatch["path"] = envPath
-		hostNamesPatch["value"] = []corev1.EnvVar{tpuWorkerHostNames}
-	} else {
-		hostNamesPatch["path"] = fmt.Sprintf("%s/-", envPath)
-		hostNamesPatch["value"] = tpuWorkerHostNames
+	// Append hostnames patch to the current list of patches.
+	var updatedPatches []patch
+	updatedPatches, envArrayExists = addEnvVarPatch(*patches, tpuWorkerHostNames, envPath, envArrayExists)
+	*patches = updatedPatches
+
+	return envArrayExists
+}
+
+// injectSubdomain sets the Pod subdomain to match the headless service.
+func injectSubdomain(clusterName string, patches *[]patch) {
+	subdomainPatch := patch{
+		"op":    "add",
+		"path":  "/spec/subdomain",
+		"value": generateHeadlessServiceName(clusterName),
 	}
-	*patches = append(*patches, subdomainPatch, hostNamesPatch)
+	*patches = append(*patches, subdomainPatch)
 }
 
 // injectReplicaLabel injects replicaIndex label into a Pod for TPU Pod scheduling and Ray multi-host autoscaling
@@ -485,23 +519,23 @@ func getEnvironmentVariable(varName string, container corev1.Container) (string,
 
 // getReplicaIndex returns the next lowest-index Pod Slice (worker group replica) to assign a Pod to in the RayCluster
 // there are three possible cases here:
-//  1. sliceToWorkerIDs is empty, this is the first pod the webhook intercepts
+//  1. sliceToTPUHosts is empty, this is the first pod the webhook intercepts
 //     - assign this pod to replica 0
-//  2. The Pod Slice exists in sliceToWorkerIDs, but has # created workers < NumOfHosts
+//  2. The Pod Slice exists in sliceToTPUHosts, but has # created workers < NumOfHosts
 //     - assign this pod to the lowest index replica with # created workers < NumOfHosts
 //     pods to the same replica
-//  3. sliceToWorkerIDs isn't empty, but all slices have # workers == NumOfHosts
+//  3. sliceToTPUHosts isn't empty, but all slices have # workers == NumOfHosts
 //     - this occurs when the pod we intercept is the first pod of a different slice in the cluster
-//     - we keep track of how many replicas of the same worker group have been added to sliceToWorkerIDs
+//     - we keep track of how many replicas of the same worker group have been added to sliceToTPUHosts
 //     so far, and assign this pod to the next integer replicaIndex
-func getReplicaIndex(sliceToWorkerIDs map[slice][]int, clusterName string, groupName string, namespace string) int {
+func getReplicaIndex(sliceToTPUHosts map[slice][]int, clusterName string, groupName string, namespace string) int {
 	// first pod created in cluster
-	if len(sliceToWorkerIDs) == 0 {
+	if len(sliceToTPUHosts) == 0 {
 		return 0
 	}
 	nextLowestId := math.MaxInt32
 	numReplicas := 0 // tracks # of replicas in worker group created so far
-	for slice, workerList := range sliceToWorkerIDs {
+	for slice, workerList := range sliceToTPUHosts {
 		if slice.clusterName == clusterName && slice.groupName == groupName && slice.namespace == namespace {
 			numReplicas++
 			createdPods := len(workerList)
@@ -521,15 +555,15 @@ func getReplicaIndex(sliceToWorkerIDs map[slice][]int, clusterName string, group
 }
 
 // getNextWorkerID returns the next lowest TPU_WORKER_ID in the Pod Slice
-func getNextWorkerID(sliceToWorkerIDs map[slice][]int, podSlice slice, namespace string, replicaIndex int) (int, error) {
+func getNextWorkerID(sliceToTPUHosts map[slice][]int, podSlice slice, namespace string, replicaIndex int) (int, error) {
 	tpuWorkerID := 0 // defaults to 0 (first Pod in slice)
-	if len(sliceToWorkerIDs) == 0 || len(sliceToWorkerIDs[podSlice]) == 0 {
+	if len(sliceToTPUHosts) == 0 || len(sliceToTPUHosts[podSlice]) == 0 {
 		return tpuWorkerID, nil
 	}
-	sort.Ints(sliceToWorkerIDs[podSlice])
+	sort.Ints(sliceToTPUHosts[podSlice])
 	// iterate through existing workers and get the next lowest, unused ID
 	lastID := 0
-	for index, workerID := range sliceToWorkerIDs[podSlice] {
+	for index, workerID := range sliceToTPUHosts[podSlice] {
 		// check for incorrect assignment of IDs
 		if index == 0 {
 			lastID = workerID
@@ -547,9 +581,9 @@ func getNextWorkerID(sliceToWorkerIDs map[slice][]int, podSlice slice, namespace
 	return tpuWorkerID, nil
 }
 
-// getSliceToWorkerIDs returns a mapping representing the current RayCluster state of TPU pods using a PodLister
-func (t *TPUWebhookServer) getSliceToWorkerIDs(clusterName string, groupName string, namespace string, numOfHosts int32) (map[slice][]int, error) {
-	sliceToWorkerIDs := make(map[slice][]int)
+// getSliceToTPUHosts returns a mapping representing the current RayCluster state of TPU pods using a PodLister
+func (t *TPUWebhookServer) getSliceToTPUHosts(clusterName string, groupName string, namespace string, numOfHosts int32) (map[slice][]int, error) {
+	sliceToTPUHosts := make(map[slice][]int)
 
 	// we only care about workers in the same RayCluster and worker group when assigning IDs
 	podsInGroup, err := t.podLister.Pods(namespace).List(labels.SelectorFromSet(labels.Set{"ray.io/cluster": clusterName, "ray.io/group": groupName}))
@@ -559,9 +593,9 @@ func (t *TPUWebhookServer) getSliceToWorkerIDs(clusterName string, groupName str
 
 	if podsInGroup == nil {
 		// return an empty mapping if no Pods with 'ray.io/group' label found
-		return sliceToWorkerIDs, nil
+		return sliceToTPUHosts, nil
 	}
-	klog.V(1).InfoS("getSliceToWorkerIDs", "RayCluster", namespace+"/"+clusterName, "# Pods in Group", len(podsInGroup))
+	klog.V(1).InfoS("getSliceToTPUHosts", "RayCluster", namespace+"/"+clusterName, "# Pods in Group", len(podsInGroup))
 	for _, existingPod := range podsInGroup {
 		if existingPod.DeletionTimestamp != nil {
 			continue
@@ -574,7 +608,7 @@ func (t *TPUWebhookServer) getSliceToWorkerIDs(clusterName string, groupName str
 
 		if !containerRequestingTPUs(existingPod.Spec.Containers...) {
 			// Pod does not request TPUs, 'ray.io/group' is not a TPU worker group
-			return sliceToWorkerIDs, nil
+			return sliceToTPUHosts, nil
 		}
 		replicaIndexLabel := existingPod.Labels["replicaIndex"]
 		if replicaIndexLabel == "" {
@@ -583,37 +617,47 @@ func (t *TPUWebhookServer) getSliceToWorkerIDs(clusterName string, groupName str
 		}
 		replicaIndexLabelValues := strings.Split(replicaIndexLabel, "-")
 		existingReplicaIndex, _ := strconv.Atoi(replicaIndexLabelValues[len(replicaIndexLabelValues)-1])
-		existingWorkerID := -1
+
+		// Number of containers in this Pod to index.
+		numTpuContainers := 0
+		for _, c := range existingPod.Spec.Containers {
+			if containerRequestingTPUs(c) {
+				numTpuContainers++
+			}
+		}
+
+		podSlice := slice{clusterName, groupName, namespace, existingReplicaIndex, numOfHosts}
+		hostIndex := -1
 		for _, container := range existingPod.Spec.Containers {
 			if !containerRequestingTPUs(container) {
 				continue
 			}
 
 			tpuWorkerIDEnvVar, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
-			tempVar, err := strconv.Atoi(tpuWorkerIDEnvVar)
+			if tpuWorkerIDEnvVar == "" {
+				// If the container has been admitted without a TPU_WORKER_ID, return
+				// an error as this will cause the TPU slice to fail JAX initialization.
+				return nil, errors.New("existing TPU worker missing TPU_WORKER_ID")
+			}
+			foundWorkerID, err := strconv.Atoi(tpuWorkerIDEnvVar)
 			if err != nil {
-				klog.ErrorS(err, "getSliceToWorkerIDs", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", tpuWorkerIDEnvVar)
+				klog.ErrorS(err, "getSliceToTPUHosts", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", tpuWorkerIDEnvVar)
 				continue
 			}
-			existingWorkerID = tempVar
+			// Determine the host this worker is running on.
+			hostIndex = foundWorkerID / numTpuContainers
 			break
 		}
-		if existingPod.Status.Phase == "Running" && existingWorkerID == -1 {
-			return nil, errors.New("existing TPU worker missing TPU_WORKER_ID")
-		}
-		if existingWorkerID != -1 {
-			// Pod has been intercepted by the webhook
-			podSlice := slice{clusterName, groupName, namespace, existingReplicaIndex, numOfHosts}
-			if sliceToWorkerIDs[podSlice] == nil {
-				sliceToWorkerIDs[podSlice] = []int{existingWorkerID}
+		if hostIndex != -1 {
+			if sliceToTPUHosts[podSlice] == nil {
+				sliceToTPUHosts[podSlice] = []int{hostIndex}
 			} else {
-				sliceToWorkerIDs[podSlice] = append(sliceToWorkerIDs[podSlice], existingWorkerID)
+				sliceToTPUHosts[podSlice] = append(sliceToTPUHosts[podSlice], hostIndex)
 			}
-			klog.V(1).InfoS("getSliceToWorkerIDs", "RayCluster", namespace+"/"+clusterName, "ReplicaIndex", existingReplicaIndex, "TPU_WORKER_ID", existingWorkerID)
-
+			klog.V(1).InfoS("getSliceToTPUHosts", "RayCluster", namespace+"/"+clusterName, "ReplicaIndex", existingReplicaIndex, "HostIndex", hostIndex)
 		}
 	}
-	return sliceToWorkerIDs, nil
+	return sliceToTPUHosts, nil
 }
 
 // extractPod returns a Pod unmarshalled from an Admission Request
@@ -706,6 +750,22 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	chipsPerHost := getNumTPUChipsRequested(containers...)
 	numOfHosts, _ := getNumTPUHostsFromTopology(clusterName, groupName, namespace, topology, chipsPerHost) // ignore error here because topology may not be set yet
 
+	// Detect v7x TPU accelerator
+	isV7x := false
+	if selector, ok := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]; ok && strings.HasPrefix(selector, tpu7xType) {
+		isV7x = true
+	}
+
+	// v7x (Ironwood) TPUs can run multiple NUMA-aligned containers per Pod to optimize
+	// memory bandwidth across the dual-chiplet architecture. We count them to assign
+	// unique worker IDs and network ports to each independent ML process.
+	numTpuContainers := 0
+	for _, c := range containers {
+		if containerRequestingTPUs(c) {
+			numTpuContainers++
+		}
+	}
+
 	// Pod indexing variables from K8s labels or assigned dynamically.
 	var replicaIndex int
 	var tpuWorkerID int
@@ -740,15 +800,15 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		defer t.wg.Add(1)
 		t.waiting += 1
 
-		// query k8s client to populate sliceToWorkerIDs
-		sliceToWorkerIDs, err := t.getSliceToWorkerIDs(clusterName, groupName, namespace, numOfHosts)
+		// query k8s client to populate sliceToTPUHosts
+		sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
 		if err != nil {
 			return nil, err
 		}
 
-		replicaIndex = getReplicaIndex(sliceToWorkerIDs, clusterName, groupName, namespace)
+		replicaIndex = getReplicaIndex(sliceToTPUHosts, clusterName, groupName, namespace)
 		podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
-		tpuWorkerID, err = getNextWorkerID(sliceToWorkerIDs, podSlice, namespace, replicaIndex)
+		tpuWorkerID, err = getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -763,24 +823,32 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	headlessServiceName := generateHeadlessServiceName(clusterName)
 
 	if numOfHosts > 1 {
-		// inject hostname into pod spec for DNS records
+		// inject hostname and subdomain into pod spec for DNS records
 		hostname := fmt.Sprintf("%s-%d-%d", groupName, replicaIndex, tpuWorkerID)
 		klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "hostname", hostname)
-		hostnamePatch := patch{"op": "add"}
-		hostnamePatch["path"] = "/spec/hostname"
-		hostnamePatch["value"] = hostname
+		hostnamePatch := patch{"op": "add", "path": "/spec/hostname", "value": hostname}
 		patches = append(patches, hostnamePatch)
+
+		injectSubdomain(clusterName, &patches)
 
 		// inject pod affinity/anti-affinity for scheduling
 		injectAffinity(pod, replicaIndex, groupName, &patches)
 	}
 
 	// inject all environment variables into the container requesting TPUs
+	tpuContainerIndex := 0
 	for i := 0; i < len(containers); i++ {
 		container := containers[i]
 		if containerRequestingTPUs(container) {
 			path := fmt.Sprintf("/spec/containers/%d/env", i)
-			envArrayExists := len(container.Env) > 0
+			isEnvInitialized := len(container.Env) > 0
+
+			// For TPU generations up until v6e, TPU_WORKER_ID was indexed per TPU Pod.
+			// With Ironwood TPU and newer, worker IDs are unique per container requesting TPU.
+			finalWorkerID := tpuWorkerID
+			if isV7x {
+				finalWorkerID = (tpuWorkerID * numTpuContainers) + tpuContainerIndex
+			}
 
 			// Multi-Slice variable injection logic.
 			if _, exists := getEnvironmentVariable("MEGASCALE_NUM_SLICES", container); exists {
@@ -788,76 +856,91 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 				// Multiple TPU multi-host replicas in the same worker group are assumed to be apart
 				// of a multi-slice configuration.
 				if val, _ := getEnvironmentVariable("MEGASCALE_SLICE_ID", container); val == "" {
-					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_SLICE_ID",
 						Value: fmt.Sprint(replicaIndex),
-					}, path, envArrayExists || len(patches) > 0)
+					}, path, isEnvInitialized)
 				}
 
 				// Set MEGASCALE_COORDINATOR_ADDRESS, the address of worker 0 of slice 0.
 				if val, _ := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", container); val == "" {
 					coordAddress := fmt.Sprintf("%s-0-0.%s", groupName, headlessServiceName)
-					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+					if isV7x {
+						// Target container 0's port
+						coordAddress = fmt.Sprintf("%s:%d", coordAddress, megascalePortBase)
+					}
+					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_COORDINATOR_ADDRESS",
 						Value: coordAddress,
-					}, path, true)
+					}, path, isEnvInitialized)
 				}
 
 				// Set MEGASCALE_PORT, defaulting to 8081 since 8080 is used by Ray for metrics.
+				megascalePort := fmt.Sprint(megascalePortBase)
+				if isV7x {
+					megascalePort = fmt.Sprint(megascalePortBase + tpuContainerIndex)
+				}
 				if val, _ := getEnvironmentVariable("MEGASCALE_PORT", container); val == "" {
-					patches, _ = addEnvVarPatch(patches, corev1.EnvVar{
+					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_PORT",
-						Value: "8081",
-					}, path, true)
+						Value: megascalePort,
+					}, path, isEnvInitialized)
 				}
 			}
-
+			// Network addressing injection logic.
 			if numOfHosts > 1 {
-				// inject TPU_WORKER_HOSTNAMES
-				hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
-				if err != nil {
-					return nil, err
+				// Legacy: inject TPU_WORKER_HOSTNAMES
+				val, _ := getEnvironmentVariable("TPU_WORKER_HOSTNAMES", container)
+				if val == "" || val == "localhost" {
+					// Inject value if unset or set to default value.
+					hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
+					if err != nil {
+						return nil, err
+					}
+					klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_HOSTNAMES", hostnames)
+					isEnvInitialized = injectHostnames(clusterName, hostnames, path, container, &patches, isEnvInitialized)
 				}
-				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_HOSTNAMES", hostnames)
-				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "subdomain", generateHeadlessServiceName(clusterName))
-				injectHostnames(clusterName, hostnames, path, container, &patches)
+
+				if isV7x {
+					// v7x only: Inject TPU_PROCESS_ADDRESSES & TPU_PROCESS_PORT
+					val, _ := getEnvironmentVariable("TPU_PROCESS_ADDRESSES", container)
+					if val == "" || strings.Contains(val, "localhost") {
+						// Inject value if unset or set to default value.
+						processAddresses, err := getTPUProcessAddresses(numOfHosts, numTpuContainers, groupName, clusterName, replicaIndex)
+						if err != nil {
+							return nil, err
+						}
+						klog.V(1).InfoS("mutatePod v7x", "RayCluster", namespace+"/"+clusterName, "TPU_PROCESS_ADDRESSES", processAddresses)
+						patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_ADDRESSES", Value: processAddresses}, path, isEnvInitialized)
+					}
+
+					if val, _ := getEnvironmentVariable("TPU_PROCESS_PORT", container); val == "" {
+						patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, isEnvInitialized)
+					}
+				}
 			}
 			// inject TPU_WORKER_ID
-			if value, _ := getEnvironmentVariable("TPU_WORKER_ID", container); value == "" {
-				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", tpuWorkerID, "Replica Index", replicaIndex)
+			valWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
+			expectedID := fmt.Sprint(finalWorkerID)
+			isDefault := valWorkerID == fmt.Sprint(tpuContainerIndex)
+
+			if valWorkerID == "" || (isDefault && valWorkerID != expectedID) {
+				// Overwrite ID if set incorrectly by user, or set to default erroneously in a multi-host env.
+				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", finalWorkerID, "Replica Index", replicaIndex)
 				workerID := corev1.EnvVar{
 					Name:  "TPU_WORKER_ID",
-					Value: fmt.Sprint(tpuWorkerID),
+					Value: fmt.Sprint(finalWorkerID),
 				}
-				idPatch := patch{"op": "add"}
-				// create new EnvVar array if container.Env is empty, and append new EnvVars if not
-				if len(container.Env) == 0 {
-					idPatch["path"] = path
-					idPatch["value"] = []corev1.EnvVar{workerID}
-				} else {
-					idPatch["path"] = fmt.Sprintf("%s/-", path)
-					idPatch["value"] = workerID
-				}
-				patches = append(patches, idPatch)
+				patches, isEnvInitialized = addEnvVarPatch(patches, workerID, path, isEnvInitialized)
 			}
 			// inject TPU_NAME
 			if value, _ := getEnvironmentVariable("TPU_NAME", container); value == "" {
 				tpuNameValue := fmt.Sprintf("%s-%d", groupName, replicaIndex)
 				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_NAME", tpuNameValue, "Replica Index", replicaIndex)
-				tpuName := corev1.EnvVar{
+				patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 					Name:  "TPU_NAME",
 					Value: tpuNameValue,
-				}
-				namePatch := patch{"op": "add"}
-				// create new EnvVar array if container.Env is empty, and append new EnvVars if not
-				if len(container.Env) == 0 {
-					namePatch["path"] = path
-					namePatch["value"] = []corev1.EnvVar{tpuName}
-				} else {
-					namePatch["path"] = fmt.Sprintf("%s/-", path)
-					namePatch["value"] = tpuName
-				}
-				patches = append(patches, namePatch)
+				}, path, isEnvInitialized)
 			}
 
 			// inject TPU_DEVICE_PLUGIN_HOST_IP. This Env Var is required for TPU_DEVICE_PLUGIN_ADDR
@@ -871,37 +954,19 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 						},
 					},
 				}
-				hostAddrPatch := patch{"op": "add"}
-				// create new EnvVar array if container.Env is empty, and append new envVars if not
-				if len(container.Env) == 0 {
-					hostAddrPatch["path"] = path
-					hostAddrPatch["value"] = []corev1.EnvVar{tpuDevicePluginAddr}
-				} else {
-					hostAddrPatch["path"] = fmt.Sprintf("%s/-", path)
-					hostAddrPatch["value"] = tpuDevicePluginAddr
-				}
-				patches = append(patches, hostAddrPatch)
+				patches, isEnvInitialized = addEnvVarPatch(patches, tpuDevicePluginAddr, path, isEnvInitialized)
 			}
 
 			// inject TPU_DEVICE_PLUGIN_ADDR
 			if value, _ := getEnvironmentVariable("TPU_DEVICE_PLUGIN_ADDR", container); value == "" {
 				tpuDevicePluginAddrValue := "$(TPU_DEVICE_PLUGIN_HOST_IP):2112"
 				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_DEVICE_PLUGIN_ADDR", tpuDevicePluginAddrValue)
-				tpuDevicePluginAddr := corev1.EnvVar{
+				patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
 					Name:  "TPU_DEVICE_PLUGIN_ADDR",
 					Value: tpuDevicePluginAddrValue,
-				}
-				pluginAddrPatch := patch{"op": "add"}
-				// create new EnvVar array if container.Env is empty, and append new EnvVars if not
-				if len(container.Env) == 0 {
-					pluginAddrPatch["path"] = path
-					pluginAddrPatch["value"] = []corev1.EnvVar{tpuDevicePluginAddr}
-				} else {
-					pluginAddrPatch["path"] = fmt.Sprintf("%s/-", path)
-					pluginAddrPatch["value"] = tpuDevicePluginAddr
-				}
-				patches = append(patches, pluginAddrPatch)
+				}, path, isEnvInitialized)
 			}
+			tpuContainerIndex++
 		}
 	}
 
