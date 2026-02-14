@@ -1,4 +1,4 @@
-FROM google-go.pkg.dev/golang:1.24.2 AS builder
+FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.24.13 AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
