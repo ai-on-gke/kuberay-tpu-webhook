@@ -59,11 +59,11 @@ For common errors encountered when deploying the webhook, see the [Troubleshooti
 
 ## What the Webhook Does Automatically
 
-When you submit a RayCluster resource requesting TPUs, this mutating webhook intercepts the Pod creation and automatically injects the required configurations so that libtpu and JAX can initialize correctly. You do not need to manually configure these in your manifests. The validating webhook will accept/reject the RayCluster 
+When you submit a RayCluster resource requesting TPUs, this mutating webhook intercepts the Pod creation and automatically injects the required configurations so that libtpu and JAX can initialize correctly. You do not need to manually configure these in your manifests.
 
 * **Network Initialization:**
-    * **TPU v4 - v6e:** Automatically generates and injects the `TPU_WORKER_HOSTNAMES` list for multi-host networking.
-    * **TPU v7x (Ironwood):** Automatically generates and injects the new `TPU_PROCESS_ADDRESSES` and `TPU_PROCESS_PORT` required for v7x architecture. `TPU_PROCESS_ADDRESSES` is identical to `TPU_WORKER_HOSTNAMES`, but with the container port appended for each address.
+    * **TPU v4 - v6e:** Automatically generates and injects the `TPU_WORKER_HOSTNAMES` list for multi-host networking. The webhook also sets the `subdomain` and `hostname` fields in the Pod spec.
+    * **TPU v7x (Ironwood):** In addition to the vars and fields injected in previous versions, also automatically generates and injects the new `TPU_PROCESS_ADDRESSES` and `TPU_PROCESS_PORT` required for v7x architecture. `TPU_PROCESS_ADDRESSES` is identical to `TPU_WORKER_HOSTNAMES`, but with the container port appended for each address.
 * **Worker Identification:** Calculates and injects `TPU_WORKER_ID` and `TPU_NAME` (a unique identifier for the replica group) for multi-host and multi-container coordination.
 * **Multi-Container (NUMA) Support:** Natively supports v7x Pods that run multiple NUMA-aligned containers, assigning unique ports and IDs to each ML process. It's important to note that multi-node support per Pod with KubeRay is experimental.
 * **Megascale (Multi-Slice) Support:** If `MEGASCALE_NUM_SLICES` is set explicitly in the Pod spec of your Ray container, the webhook automatically calculates and injects `MEGASCALE_SLICE_ID`, `MEGASCALE_COORDINATOR_ADDRESS`, and `MEGASCALE_PORT`. If utilizing the [JaxTrainer](https://docs.ray.io/en/latest/train/api/doc/ray.train.v2.jax.JaxTrainer.html#ray.train.v2.jax.JaxTrainer) in Ray Train, `MEGASCALE_NUM_SLICES` and related env vars are calculated for you based on the value of `num_workers`, `accelerator_type`, and `topology` and set automatically at runtime.
@@ -77,7 +77,7 @@ The webhook evaluates each `workerGroupSpec` against the following rules:
 
 * **Non-TPU Workloads are Ignored:** If a worker group's containers do not request `google.com/tpu` resources, the webhook immediately admits them without further checks.
 * **Missing NumOfHosts:** If `numOfHosts` is set to `0` or omitted for a TPU multi-host worker group (determined from the topology and accelerator type), the cluster is rejected. `numOfHosts` defaults to `1` in KubeRay.
-* **Missing Node Selectors or TPU Limits:** If a TPU worker group is missing the `cloud.google.com/gke-tpu-topology` node selector, or if the containers do not explicitly define a `google.com/tpu` resource request/limit, the cluster is rejected.
+* **Missing Node Selectors:** If a TPU worker group is missing the `cloud.google.com/gke-tpu-topology` node selector the cluster is rejected.
 * **Strict Topology Validation:** The webhook strictly enforces that the number of physical TPU hosts requested matches your requested physical topology. It calculates this using the following formula:
     * **Expected Hosts:** `max(Total Chips / Chips Per Host, 1)`
     * If the calculated `Expected Hosts` does not exactly match the `numOfHosts` defined in your `workerGroupSpec`, the cluster is rejected with the error: `"Number of workers in worker group not equal to specified topology"`.
