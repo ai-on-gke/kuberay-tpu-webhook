@@ -1016,10 +1016,10 @@ func Test_InjectAffinity(t *testing.T) {
 			}
 			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[tc.expectedLabelKey].Operator)
 			assert.Equal(t, []string{tc.expectedLabelValue}, podMatchExprs[tc.expectedLabelKey].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, podMatchExprs["ray.io/cluster"].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs["ray.io/group"].Operator)
-			assert.Equal(t, []string{tc.groupName}, podMatchExprs["ray.io/group"].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, podMatchExprs[utils.RayClusterLabelKey].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[utils.RayNodeGroupLabelKey].Operator)
+			assert.Equal(t, []string{tc.groupName}, podMatchExprs[utils.RayNodeGroupLabelKey].Values)
 
 			// Validate PodAntiAffinity is injected with expected label selectors
 			podAntiAffinityTerms := affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
@@ -1032,18 +1032,18 @@ func Test_InjectAffinity(t *testing.T) {
 			}
 			assert.Equal(t, metav1.LabelSelectorOpNotIn, term0MatchExprs[tc.expectedLabelKey].Operator)
 			assert.Equal(t, []string{tc.expectedLabelValue}, term0MatchExprs[tc.expectedLabelKey].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, term0MatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term0MatchExprs["ray.io/cluster"].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, term0MatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, term0MatchExprs[utils.RayClusterLabelKey].Values)
 
 			// Anti-affinity for Pods of same cluster but different group
 			term1MatchExprs := map[string]metav1.LabelSelectorRequirement{}
 			for _, expr := range podAntiAffinityTerms[1].LabelSelector.MatchExpressions {
 				term1MatchExprs[expr.Key] = expr
 			}
-			assert.Equal(t, metav1.LabelSelectorOpNotIn, term1MatchExprs["ray.io/group"].Operator)
-			assert.Equal(t, []string{tc.groupName}, term1MatchExprs["ray.io/group"].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, term1MatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term1MatchExprs["ray.io/cluster"].Values)
+			assert.Equal(t, metav1.LabelSelectorOpNotIn, term1MatchExprs[utils.RayNodeGroupLabelKey].Operator)
+			assert.Equal(t, []string{tc.groupName}, term1MatchExprs[utils.RayNodeGroupLabelKey].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, term1MatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, term1MatchExprs[utils.RayClusterLabelKey].Values)
 			assert.Equal(t, metav1.LabelSelectorOpExists, term1MatchExprs[tc.expectedLabelKey].Operator)
 
 			// Anti-affinity for Pods of different cluster when replicaIndex exists
@@ -1052,8 +1052,8 @@ func Test_InjectAffinity(t *testing.T) {
 				term2MatchExprs[expr.Key] = expr
 			}
 			assert.Equal(t, metav1.LabelSelectorOpExists, term2MatchExprs[tc.expectedLabelKey].Operator)
-			assert.Equal(t, metav1.LabelSelectorOpNotIn, term2MatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term2MatchExprs["ray.io/cluster"].Values)
+			assert.Equal(t, metav1.LabelSelectorOpNotIn, term2MatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, term2MatchExprs[utils.RayClusterLabelKey].Values)
 			assert.NotNil(t, podAntiAffinityTerms[2].NamespaceSelector)
 		})
 	}

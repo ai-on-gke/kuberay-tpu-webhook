@@ -355,7 +355,7 @@ func makeLabelSelectorRequirement(key string, op metav1.LabelSelectorOperator, v
 // injectAffinity injects pod affinity and anti-affinity scheduling constraints using replicaIndex and cluster labels
 // to ensure TPU Pods from the same multi-host replica are co-located.
 func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, patches *[]patch) {
-	clusterName := pod.Labels["ray.io/cluster"]
+	clusterName := pod.Labels[utils.RayClusterLabelKey]
 	topologyKey := "cloud.google.com/gke-nodepool"
 
 	var affinityLabelKey string
@@ -376,8 +376,8 @@ func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, p
 
 	// Co-schedule on a node-pool Pods with the same replica index, RayCluster, and worker group label
 	replicaIndexIn := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpIn, affinityLabelValue)
-	clusterIn := makeLabelSelectorRequirement("ray.io/cluster", metav1.LabelSelectorOpIn, clusterName)
-	groupIn := makeLabelSelectorRequirement("ray.io/group", metav1.LabelSelectorOpIn, workerGroupName)
+	clusterIn := makeLabelSelectorRequirement(utils.RayClusterLabelKey, metav1.LabelSelectorOpIn, clusterName)
+	groupIn := makeLabelSelectorRequirement(utils.RayNodeGroupLabelKey, metav1.LabelSelectorOpIn, workerGroupName)
 	podAffinity := corev1.PodAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
 			LabelSelector: &metav1.LabelSelector{
@@ -388,8 +388,8 @@ func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, p
 	}
 	// Avoid scheduling on a node-pool with Pods of a different worker group or RayCluster and ANY replicaIndex label
 	replicaIndexNotIn := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpNotIn, affinityLabelValue)
-	clusterNotIn := makeLabelSelectorRequirement("ray.io/cluster", metav1.LabelSelectorOpNotIn, clusterName)
-	groupNotIn := makeLabelSelectorRequirement("ray.io/group", metav1.LabelSelectorOpNotIn, workerGroupName)
+	clusterNotIn := makeLabelSelectorRequirement(utils.RayClusterLabelKey, metav1.LabelSelectorOpNotIn, clusterName)
+	groupNotIn := makeLabelSelectorRequirement(utils.RayNodeGroupLabelKey, metav1.LabelSelectorOpNotIn, workerGroupName)
 	replicaIndexExists := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpExists)
 	podAntiAffinity := corev1.PodAntiAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
@@ -618,7 +618,7 @@ func (t *TPUWebhookServer) getSliceToTPUHosts(clusterName string, groupName stri
 	sliceToTPUHosts := make(map[slice][]int)
 
 	// we only care about workers in the same RayCluster and worker group when assigning IDs
-	podsInGroup, err := t.podLister.Pods(namespace).List(labels.SelectorFromSet(labels.Set{"ray.io/cluster": clusterName, "ray.io/group": groupName}))
+	podsInGroup, err := t.podLister.Pods(namespace).List(labels.SelectorFromSet(labels.Set{utils.RayClusterLabelKey: clusterName, utils.RayNodeGroupLabelKey: groupName}))
 	if err != nil {
 		return nil, err
 	}
@@ -765,11 +765,11 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 	// ray operator only sets GenerateName field - doesn't include random suffix until after admission request
 	// use mapping of {cluster name, group name, replicaIndex} -> workers to extract next TPU_WORKER_ID
-	clusterName := pod.Labels["ray.io/cluster"]
+	clusterName := pod.Labels[utils.RayClusterLabelKey]
 	if clusterName == "" {
 		return nil, errors.New("Ray Pod created by KubeRay missing RayCluster label")
 	}
-	groupName := pod.Labels["ray.io/group"]
+	groupName := pod.Labels[utils.RayNodeGroupLabelKey]
 	if groupName == "" {
 		return nil, errors.New("Ray Pod created by KubeRay missing Group label")
 	}
@@ -1098,7 +1098,7 @@ func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 		// Pod was not mutated by the webhook
 		return false, nil
 	}
-	clusterName := pod.Labels["ray.io/cluster"]
+	clusterName := pod.Labels[utils.RayClusterLabelKey]
 	if clusterName == "" {
 		return false, errors.New("Ray Pod created by KubeRay missing RayCluster label")
 	}
