@@ -207,7 +207,7 @@ func getTestInterceptedTPUPods(templatePod *corev1.Pod, numPods int, numSlices i
 		}
 		testTPUWorkerCopy.Spec.Containers[0].Env = env
 		testTPUWorkerCopy.Name = fmt.Sprintf("%s-%d", "intercepted-tpu-pod", i)
-		testTPUWorkerCopy.Labels["replicaIndex"] = replicaIndex
+		testTPUWorkerCopy.Labels[legacyReplicaIndexLabelKey] = replicaIndex
 		testInterceptedTPUPods = append(testInterceptedTPUPods, testTPUWorkerCopy)
 	}
 	return testInterceptedTPUPods
@@ -983,7 +983,7 @@ func Test_InjectAffinity(t *testing.T) {
 			testPod:              getTestTPUWorker("test-cluster", "test-group-name", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
 			replicaIndex:         0,
 			groupName:            "test-group-name",
-			expectedLabelKey:     "replicaIndex",
+			expectedLabelKey:     legacyReplicaIndexLabelKey,
 			expectedLabelValue:   "test-group-name-0",
 			expectedClusterLabel: "test-cluster",
 		},
@@ -1433,7 +1433,7 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 			// set TPU_WORKER_ID for testPod
 			if containerRequestingTPUs(tc.testPod.Spec.Containers...) {
 				if tc.testReplicaID != "" {
-					tc.testPod.Labels["replicaIndex"] = tc.testReplicaID
+					tc.testPod.Labels[legacyReplicaIndexLabelKey] = tc.testReplicaID
 					tc.testPod.Spec.Containers[0].Env = []corev1.EnvVar{
 						{
 							Name:  "TPU_WORKER_ID",

@@ -81,6 +81,8 @@ const (
 	megascalePortBase  = 8081
 	tpuResourceName    = corev1.ResourceName("google.com/tpu")
 	tpu7xType          = "tpu7x"
+
+	legacyReplicaIndexLabelKey = "replicaIndex"
 )
 
 var (
@@ -332,7 +334,7 @@ func injectReplicaLabel(clusterName string, namespace string, replicaIndex int, 
 	labelPath := "/metadata/labels/replicaIndex"
 	replicaLabelValue := fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
 
-	klog.V(1).InfoS("injectReplicaLabel", "RayCluster", namespace+"/"+clusterName, "replicaIndex", replicaLabelValue)
+	klog.V(1).InfoS("injectReplicaLabel", "RayCluster", namespace+"/"+clusterName, legacyReplicaIndexLabelKey, replicaLabelValue)
 
 	labelPatch["path"] = labelPath
 	labelPatch["value"] = replicaLabelValue
@@ -368,7 +370,7 @@ func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, p
 		affinityLabelKey = utils.RayWorkerReplicaIndexKey
 		affinityLabelValue = fmt.Sprint(replicaIndex)
 	} else {
-		affinityLabelKey = "replicaIndex"
+		affinityLabelKey = legacyReplicaIndexLabelKey
 		affinityLabelValue = fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
 	}
 
@@ -607,7 +609,7 @@ func getNextWorkerID(sliceToTPUHosts map[slice][]int, podSlice slice, namespace 
 		lastID = workerID
 		tpuWorkerID++
 	}
-	klog.V(1).InfoS("getNextWorkerID", "RayCluster", namespace+"/"+podSlice.clusterName, "Worker Group", podSlice.groupName, "replicaIndex", replicaIndex, "TPU_WORKER_ID", tpuWorkerID)
+	klog.V(1).InfoS("getNextWorkerID", "RayCluster", namespace+"/"+podSlice.clusterName, "Worker Group", podSlice.groupName, legacyReplicaIndexLabelKey, replicaIndex, "TPU_WORKER_ID", tpuWorkerID)
 	return tpuWorkerID, nil
 }
 
@@ -640,7 +642,7 @@ func (t *TPUWebhookServer) getSliceToTPUHosts(clusterName string, groupName stri
 			// Pod does not request TPUs, 'ray.io/group' is not a TPU worker group
 			return sliceToTPUHosts, nil
 		}
-		replicaIndexLabel := existingPod.Labels["replicaIndex"]
+		replicaIndexLabel := existingPod.Labels[legacyReplicaIndexLabelKey]
 		if replicaIndexLabel == "" {
 			// Pod has not been intercepted by the KubeRay TPU webhook yet
 			continue
@@ -684,7 +686,7 @@ func (t *TPUWebhookServer) getSliceToTPUHosts(clusterName string, groupName stri
 			} else {
 				sliceToTPUHosts[podSlice] = append(sliceToTPUHosts[podSlice], hostIndex)
 			}
-			klog.V(1).InfoS("getSliceToTPUHosts", "RayCluster", namespace+"/"+clusterName, "ReplicaIndex", existingReplicaIndex, "HostIndex", hostIndex)
+			klog.V(1).InfoS("getSliceToTPUHosts", "RayCluster", namespace+"/"+clusterName, legacyReplicaIndexLabelKey, existingReplicaIndex, "HostIndex", hostIndex)
 		}
 	}
 	return sliceToTPUHosts, nil
@@ -1091,7 +1093,7 @@ func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 		// Pod does not use TPUs
 		return false, nil
 	}
-	replicaIndex := pod.Labels["replicaIndex"]
+	replicaIndex := pod.Labels[legacyReplicaIndexLabelKey]
 	if replicaIndex == "" {
 		// Pod was not mutated by the webhook
 		return false, nil
