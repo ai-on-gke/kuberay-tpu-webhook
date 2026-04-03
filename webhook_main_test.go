@@ -970,6 +970,7 @@ func Test_InjectAffinity(t *testing.T) {
 	nativePod := getTestTPUWorker("test-cluster", "test-group-name", "test-namespace", "tpu-v4-podslice", "2x2x1", "4")
 	nativePod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
 	nativePod.Labels[utils.RayHostIndexKey] = "0"
+	nativePod.Labels[utils.RayWorkerReplicaNameKey] = "test-group-name-xh3hf"
 
 	tests := map[string]struct {
 		testPod              *corev1.Pod
@@ -991,8 +992,8 @@ func Test_InjectAffinity(t *testing.T) {
 			testPod:              nativePod,
 			replicaIndex:         0,
 			groupName:            "test-group-name",
-			expectedLabelKey:     utils.RayWorkerReplicaIndexKey,
-			expectedLabelValue:   "0",
+			expectedLabelKey:     utils.RayWorkerReplicaNameKey,
+			expectedLabelValue:   "test-group-name-xh3hf",
 			expectedClusterLabel: "test-cluster",
 		},
 	}
@@ -1018,14 +1019,12 @@ func Test_InjectAffinity(t *testing.T) {
 			assert.Equal(t, []string{tc.expectedLabelValue}, podMatchExprs[tc.expectedLabelKey].Values)
 			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[utils.RayClusterLabelKey].Operator)
 			assert.Equal(t, []string{tc.expectedClusterLabel}, podMatchExprs[utils.RayClusterLabelKey].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[utils.RayNodeGroupLabelKey].Operator)
-			assert.Equal(t, []string{tc.groupName}, podMatchExprs[utils.RayNodeGroupLabelKey].Values)
 
 			// Validate PodAntiAffinity is injected with expected label selectors
 			podAntiAffinityTerms := affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-			assert.Len(t, podAntiAffinityTerms, 3, "Expected exactly 3 anti-affinity terms")
+			assert.Len(t, podAntiAffinityTerms, 2, "Expected exactly 2 anti-affinity terms")
 
-			// Anti-affinity for Pods of same cluster but different replicaIndex
+			// Anti-affinity for Pods of same cluster but different replica name/index
 			term0MatchExprs := map[string]metav1.LabelSelectorRequirement{}
 			for _, expr := range podAntiAffinityTerms[0].LabelSelector.MatchExpressions {
 				term0MatchExprs[expr.Key] = expr
@@ -1035,26 +1034,15 @@ func Test_InjectAffinity(t *testing.T) {
 			assert.Equal(t, metav1.LabelSelectorOpIn, term0MatchExprs[utils.RayClusterLabelKey].Operator)
 			assert.Equal(t, []string{tc.expectedClusterLabel}, term0MatchExprs[utils.RayClusterLabelKey].Values)
 
-			// Anti-affinity for Pods of same cluster but different group
+			// Anti-affinity for Pods of different cluster when replica name/index exists
 			term1MatchExprs := map[string]metav1.LabelSelectorRequirement{}
 			for _, expr := range podAntiAffinityTerms[1].LabelSelector.MatchExpressions {
 				term1MatchExprs[expr.Key] = expr
 			}
-			assert.Equal(t, metav1.LabelSelectorOpNotIn, term1MatchExprs[utils.RayNodeGroupLabelKey].Operator)
-			assert.Equal(t, []string{tc.groupName}, term1MatchExprs[utils.RayNodeGroupLabelKey].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, term1MatchExprs[utils.RayClusterLabelKey].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term1MatchExprs[utils.RayClusterLabelKey].Values)
 			assert.Equal(t, metav1.LabelSelectorOpExists, term1MatchExprs[tc.expectedLabelKey].Operator)
-
-			// Anti-affinity for Pods of different cluster when replicaIndex exists
-			term2MatchExprs := map[string]metav1.LabelSelectorRequirement{}
-			for _, expr := range podAntiAffinityTerms[2].LabelSelector.MatchExpressions {
-				term2MatchExprs[expr.Key] = expr
-			}
-			assert.Equal(t, metav1.LabelSelectorOpExists, term2MatchExprs[tc.expectedLabelKey].Operator)
-			assert.Equal(t, metav1.LabelSelectorOpNotIn, term2MatchExprs[utils.RayClusterLabelKey].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term2MatchExprs[utils.RayClusterLabelKey].Values)
-			assert.NotNil(t, podAntiAffinityTerms[2].NamespaceSelector)
+			assert.Equal(t, metav1.LabelSelectorOpNotIn, term1MatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, term1MatchExprs[utils.RayClusterLabelKey].Values)
+			assert.NotNil(t, podAntiAffinityTerms[1].NamespaceSelector)
 		})
 	}
 }

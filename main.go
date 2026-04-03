@@ -362,54 +362,43 @@ func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, p
 	var affinityLabelValue string
 
 	// Check if the Pod has native KubeRay indexing labels
-	_, hasReplicaLabel := pod.Labels[utils.RayWorkerReplicaIndexKey]
+	replicaName, hasReplicaNameLabel := pod.Labels[utils.RayWorkerReplicaNameKey]
 	_, hasHostLabel := pod.Labels[utils.RayHostIndexKey]
 
 	// Determine the label to use for affinity, set either by KubeRay or this webhook.
-	if hasReplicaLabel && hasHostLabel {
-		affinityLabelKey = utils.RayWorkerReplicaIndexKey
-		affinityLabelValue = fmt.Sprint(replicaIndex)
+	if hasReplicaNameLabel && hasHostLabel {
+		// Use the unique replica name (e.g. ray.io/worker-group-replica-name: workergroup-xh3hf) for scheduling constraints
+		affinityLabelKey = utils.RayWorkerReplicaNameKey
+		affinityLabelValue = replicaName
 	} else {
+		// Fallback to legacy webhook label (e.g. replicaIndex: workergroup-0)
 		affinityLabelKey = legacyReplicaIndexLabelKey
 		affinityLabelValue = fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
 	}
 
-	// Co-schedule on a node-pool Pods with the same replica index, RayCluster, and worker group label
-	replicaIndexIn := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpIn, affinityLabelValue)
+	// Co-schedule on a node-pool Pods with the same unique replica name and RayCluster
+	replicaIn := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpIn, affinityLabelValue)
 	clusterIn := makeLabelSelectorRequirement(utils.RayClusterLabelKey, metav1.LabelSelectorOpIn, clusterName)
-	groupIn := makeLabelSelectorRequirement(utils.RayNodeGroupLabelKey, metav1.LabelSelectorOpIn, workerGroupName)
 	podAffinity := corev1.PodAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
 			LabelSelector: &metav1.LabelSelector{
-				MatchExpressions: []metav1.LabelSelectorRequirement{replicaIndexIn, clusterIn, groupIn},
+				MatchExpressions: []metav1.LabelSelectorRequirement{replicaIn, clusterIn},
 			},
 			TopologyKey: topologyKey,
 		}},
 	}
-	// Avoid scheduling on a node-pool with Pods of a different worker group or RayCluster and ANY replicaIndex label
-	replicaIndexNotIn := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpNotIn, affinityLabelValue)
+	// Avoid scheduling on a node-pool with Pods of a different replica name label
+	replicaNotIn := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpNotIn, affinityLabelValue)
 	clusterNotIn := makeLabelSelectorRequirement(utils.RayClusterLabelKey, metav1.LabelSelectorOpNotIn, clusterName)
-	groupNotIn := makeLabelSelectorRequirement(utils.RayNodeGroupLabelKey, metav1.LabelSelectorOpNotIn, workerGroupName)
-	replicaIndexExists := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpExists)
+	replicaExists := makeLabelSelectorRequirement(affinityLabelKey, metav1.LabelSelectorOpExists)
 	podAntiAffinity := corev1.PodAntiAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
 			{
 				// Repel pods in the same cluster that have a different replica index.
 				LabelSelector: &metav1.LabelSelector{
 					MatchExpressions: []metav1.LabelSelectorRequirement{
-						replicaIndexNotIn,
+						replicaNotIn,
 						clusterIn,
-					},
-				},
-				TopologyKey: topologyKey,
-			},
-			{
-				// Repel pods in the same cluster that belong to a different worker group.
-				LabelSelector: &metav1.LabelSelector{
-					MatchExpressions: []metav1.LabelSelectorRequirement{
-						groupNotIn,
-						clusterIn,
-						replicaIndexExists,
 					},
 				},
 				TopologyKey: topologyKey,
@@ -419,7 +408,7 @@ func injectAffinity(pod *corev1.Pod, replicaIndex int, workerGroupName string, p
 				LabelSelector: &metav1.LabelSelector{
 					MatchExpressions: []metav1.LabelSelectorRequirement{
 						clusterNotIn,
-						replicaIndexExists,
+						replicaExists,
 					},
 				},
 				TopologyKey: topologyKey,
