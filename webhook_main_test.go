@@ -207,7 +207,7 @@ func getTestInterceptedTPUPods(templatePod *corev1.Pod, numPods int, numSlices i
 		}
 		testTPUWorkerCopy.Spec.Containers[0].Env = env
 		testTPUWorkerCopy.Name = fmt.Sprintf("%s-%d", "intercepted-tpu-pod", i)
-		testTPUWorkerCopy.Labels["replicaIndex"] = replicaIndex
+		testTPUWorkerCopy.Labels[legacyReplicaIndexLabelKey] = replicaIndex
 		testInterceptedTPUPods = append(testInterceptedTPUPods, testTPUWorkerCopy)
 	}
 	return testInterceptedTPUPods
@@ -966,18 +966,34 @@ func Test_InjectReplicaLabel(t *testing.T) {
 }
 
 func Test_InjectAffinity(t *testing.T) {
+	// Prepare a pod with native KubeRay indexing labels
+	nativePod := getTestTPUWorker("test-cluster", "test-group-name", "test-namespace", "tpu-v4-podslice", "2x2x1", "4")
+	nativePod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+	nativePod.Labels[utils.RayHostIndexKey] = "0"
+	nativePod.Labels[utils.RayWorkerReplicaNameKey] = "test-group-name-xh3hf"
+
 	tests := map[string]struct {
 		testPod              *corev1.Pod
 		replicaIndex         int
 		groupName            string
-		expectedReplicaLabel string
+		expectedLabelKey     string
+		expectedLabelValue   string
 		expectedClusterLabel string
 	}{
-		"injectAffinity with replicaIndex and cluster labels": {
-			testPod:              getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
+		"injectAffinity with legacy replicaIndex and cluster labels": {
+			testPod:              getTestTPUWorker("test-cluster", "test-group-name", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
 			replicaIndex:         0,
 			groupName:            "test-group-name",
-			expectedReplicaLabel: "test-group-name-0",
+			expectedLabelKey:     legacyReplicaIndexLabelKey,
+			expectedLabelValue:   "test-group-name-0",
+			expectedClusterLabel: "test-cluster",
+		},
+		"injectAffinity with KubeRay native labels": {
+			testPod:              nativePod,
+			replicaIndex:         0,
+			groupName:            "test-group-name",
+			expectedLabelKey:     utils.RayWorkerReplicaNameKey,
+			expectedLabelValue:   "test-group-name-xh3hf",
 			expectedClusterLabel: "test-cluster",
 		},
 	}
@@ -999,31 +1015,33 @@ func Test_InjectAffinity(t *testing.T) {
 			for _, expr := range podAffinityTerms[0].LabelSelector.MatchExpressions {
 				podMatchExprs[expr.Key] = expr
 			}
-			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs["replicaIndex"].Operator)
-			assert.Equal(t, []string{tc.expectedReplicaLabel}, podMatchExprs["replicaIndex"].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, podMatchExprs["ray.io/cluster"].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[tc.expectedLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedLabelValue}, podMatchExprs[tc.expectedLabelKey].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, podMatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, podMatchExprs[utils.RayClusterLabelKey].Values)
 
 			// Validate PodAntiAffinity is injected with expected label selectors
 			podAntiAffinityTerms := affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-			// Check anti-affinity for Pods of same cluster and different replicaIndex
-			term1MatchExprs := map[string]metav1.LabelSelectorRequirement{}
+			assert.Len(t, podAntiAffinityTerms, 2, "Expected exactly 2 anti-affinity terms")
+
+			// Anti-affinity for Pods of same cluster but different replica name/index
+			term0MatchExprs := map[string]metav1.LabelSelectorRequirement{}
 			for _, expr := range podAntiAffinityTerms[0].LabelSelector.MatchExpressions {
+				term0MatchExprs[expr.Key] = expr
+			}
+			assert.Equal(t, metav1.LabelSelectorOpNotIn, term0MatchExprs[tc.expectedLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedLabelValue}, term0MatchExprs[tc.expectedLabelKey].Values)
+			assert.Equal(t, metav1.LabelSelectorOpIn, term0MatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, term0MatchExprs[utils.RayClusterLabelKey].Values)
+
+			// Anti-affinity for Pods of different cluster when replica name/index exists
+			term1MatchExprs := map[string]metav1.LabelSelectorRequirement{}
+			for _, expr := range podAntiAffinityTerms[1].LabelSelector.MatchExpressions {
 				term1MatchExprs[expr.Key] = expr
 			}
-			assert.Equal(t, metav1.LabelSelectorOpNotIn, term1MatchExprs["replicaIndex"].Operator)
-			assert.Equal(t, []string{tc.expectedReplicaLabel}, term1MatchExprs["replicaIndex"].Values)
-			assert.Equal(t, metav1.LabelSelectorOpIn, term1MatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term1MatchExprs["ray.io/cluster"].Values)
-
-			// Check anti-affinity for Pods of different cluster when replicaIndex exists
-			term2MatchExprs := map[string]metav1.LabelSelectorRequirement{}
-			for _, expr := range podAntiAffinityTerms[1].LabelSelector.MatchExpressions {
-				term2MatchExprs[expr.Key] = expr
-			}
-			assert.Equal(t, metav1.LabelSelectorOpExists, term2MatchExprs["replicaIndex"].Operator)
-			assert.Equal(t, metav1.LabelSelectorOpNotIn, term2MatchExprs["ray.io/cluster"].Operator)
-			assert.Equal(t, []string{tc.expectedClusterLabel}, term2MatchExprs["ray.io/cluster"].Values)
+			assert.Equal(t, metav1.LabelSelectorOpExists, term1MatchExprs[tc.expectedLabelKey].Operator)
+			assert.Equal(t, metav1.LabelSelectorOpNotIn, term1MatchExprs[utils.RayClusterLabelKey].Operator)
+			assert.Equal(t, []string{tc.expectedClusterLabel}, term1MatchExprs[utils.RayClusterLabelKey].Values)
 			assert.NotNil(t, podAntiAffinityTerms[1].NamespaceSelector)
 		})
 	}
@@ -1403,7 +1421,7 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 			// set TPU_WORKER_ID for testPod
 			if containerRequestingTPUs(tc.testPod.Spec.Containers...) {
 				if tc.testReplicaID != "" {
-					tc.testPod.Labels["replicaIndex"] = tc.testReplicaID
+					tc.testPod.Labels[legacyReplicaIndexLabelKey] = tc.testReplicaID
 					tc.testPod.Spec.Containers[0].Env = []corev1.EnvVar{
 						{
 							Name:  "TPU_WORKER_ID",
