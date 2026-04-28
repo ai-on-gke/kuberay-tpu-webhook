@@ -1,6 +1,6 @@
 module github.com/GoogleCloudPlatform/kuberay-tpu-webhook
 
-go 1.25.8
+go 1.25.9
 
 require (
 	github.com/ray-project/kuberay/ray-operator v1.5.0
