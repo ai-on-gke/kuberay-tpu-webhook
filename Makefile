@@ -31,6 +31,10 @@ vet:
 # Run go test against code.
 test:
 	go test ./...
+
+# Run E2E tests.
+e2e:
+	./scripts/run-e2e.sh
   
 uninstall:  
 	kubectl delete -f deployments/
