@@ -26,7 +26,11 @@ func init() {
 	} else {
 		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
+}
+
+func TestMain(m *testing.M) {
 	flag.Parse()
+	os.Exit(m.Run())
 }
 
 func TestWebhookMutation_V6e(t *testing.T) {
@@ -149,22 +153,22 @@ func TestWebhookMutation_V6e_MultiHost(t *testing.T) {
 		if pod.Labels["ray.io/node-type"] == "worker" {
 			numWorkerPods++
 			envVars := pod.Spec.Containers[0].Env
-			
+
 			// Extract values
 			workerId := getEnvVarValue(envVars, "TPU_WORKER_ID")
 			tpuName := getEnvVarValue(envVars, "TPU_NAME")
-			
+
 			assert.NotEmpty(t, workerId, "TPU_WORKER_ID is empty")
 			assert.NotEmpty(t, tpuName, "TPU_NAME is empty")
-			
+
 			workerIds[workerId] = true
 			tpuNames[tpuName] = true
-			
+
 			// Check labels
 			replicaIndex := pod.Labels["replicaIndex"]
 			assert.NotEmpty(t, replicaIndex, "replicaIndex label is missing")
 			replicaIndices[replicaIndex] = true
-			
+
 			// Verify subdomain and hostname
 			assert.NotEmpty(t, pod.Spec.Subdomain, "Subdomain not set")
 			assert.NotEmpty(t, pod.Spec.Hostname, "Hostname not set")
@@ -178,11 +182,11 @@ func TestWebhookMutation_V6e_MultiHost(t *testing.T) {
 	// Assertions
 	assert.Equal(t, 4, numWorkerPods, "Expected 4 worker pods for v6e multi-host fixture")
 	assert.Equal(t, 4, len(workerIds), "TPU_WORKER_ID values are not unique")
-	
+
 	for i := 0; i < 4; i++ {
 		assert.True(t, workerIds[fmt.Sprint(i)], "Missing TPU_WORKER_ID %d", i)
 	}
-	
+
 	assert.Equal(t, 1, len(tpuNames), "All pods in the same slice should share the same TPU_NAME")
 	assert.Equal(t, 1, len(replicaIndices), "All pods in the same slice should share the same replicaIndex")
 }

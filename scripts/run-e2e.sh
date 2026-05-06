@@ -32,7 +32,7 @@ fi
 echo "Getting credentials for cluster $CLUSTER_NAME..."
 gcloud container clusters get-credentials "$CLUSTER_NAME" --zone "$ZONE"
 
-# Install cert-manager (usually required for webhooks)
+# Install cert-manager - required for OSS webhook.
 echo "Checking for cert-manager..."
 if ! kubectl get pods -n cert-manager >/dev/null 2>&1; then
     echo "Installing cert-manager..."
