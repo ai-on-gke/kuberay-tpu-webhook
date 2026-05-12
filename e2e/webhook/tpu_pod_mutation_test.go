@@ -61,7 +61,7 @@ func TestWebhookMutation_V6e(t *testing.T) {
 
 	// TODO: Use dynamic client to create cluster instead of assuming it exists.
 
-	labelSelector := fmt.Sprintf("ray.io/cluster-name=%s", rayCluster.Name)
+	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
 	fmt.Printf("Looking for pods with selector: %s\n", labelSelector)
 
 	// Wait for pods
@@ -122,7 +122,7 @@ func TestWebhookMutation_V6e_MultiHost(t *testing.T) {
 		t.Fatalf("Error decoding fixture: %v", err)
 	}
 
-	labelSelector := fmt.Sprintf("ray.io/cluster-name=%s", rayCluster.Name)
+	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
 	fmt.Printf("Looking for pods with selector: %s\n", labelSelector)
 
 	// Wait for pods
