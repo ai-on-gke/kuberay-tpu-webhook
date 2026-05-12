@@ -135,6 +135,6 @@ For a more advanced workload running Stable Diffusion on TPUs, see [here](https:
 
 ## End-to-End Testing Guide
 
-To run E2E validation, mutation tests, and dynamic pod churn qualification for this webhook on GKE, follow the developer instructions in the **[E2E Testing Guide](file:///usr/local/google/home/ryanaoleary/Desktop/forks/kuberay-tpu-webhook/e2e/README.md)**.
+To run E2E validation, mutation tests, and dynamic pod churn qualification for this webhook on GKE, follow the developer instructions in the **[E2E Testing Guide](e2e/README.md)**.
 
 [1]: https://console.cloud.google.com/artifacts/docker/ai-on-gke/us/kuberay-tpu-webhook/tpu-webhook
