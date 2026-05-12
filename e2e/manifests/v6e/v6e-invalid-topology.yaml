@@ -1,0 +1,35 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: tpu-v6e-invalid-topology
+spec:
+  headGroupSpec:
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:2.55.0
+          resources:
+            requests:
+              cpu: "1"
+            limits:
+              cpu: "1"
+  workerGroupSpecs:
+  - replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    groupName: tpu-worker-group
+    numOfHosts: 2
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:2.55.0
+          resources:
+            requests:
+              google.com/tpu: "8"
+            limits:
+              google.com/tpu: "8"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+          cloud.google.com/gke-tpu-topology: 2x4

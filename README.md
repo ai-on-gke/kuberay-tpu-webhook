@@ -133,4 +133,8 @@ print(ray.get(result))
 
 For a more advanced workload running Stable Diffusion on TPUs, see [here](https://cloud.google.com/kubernetes-engine/docs/add-on/ray-on-gke/tutorials/deploy-ray-serve-stable-diffusion-tpu). For an example of serving a LLM with TPUs, RayServe, and KubeRay, see [here](https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-lllm-tpu-ray).
 
+## End-to-End Testing Guide
+
+To run E2E validation, mutation tests, and dynamic pod churn qualification for this webhook on GKE, follow the developer instructions in the **[E2E Testing Guide](file:///usr/local/google/home/ryanaoleary/Desktop/forks/kuberay-tpu-webhook/e2e/README.md)**.
+
 [1]: https://console.cloud.google.com/artifacts/docker/ai-on-gke/us/kuberay-tpu-webhook/tpu-webhook

@@ -56,3 +56,6 @@ deploy-cert:
 
 uninstall-cert:
 	kubectl delete -f certs/
+
+.PHONY: webhook run fmt vet test e2e deploy uninstall docker-build docker-push deploy-cert uninstall-cert
+

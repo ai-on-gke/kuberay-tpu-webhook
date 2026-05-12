@@ -6,7 +6,7 @@ set -e
 # Required environment variables
 PROJECT_ID=${PROJECT_ID:-$(gcloud config get project)}
 CLUSTER_NAME=${CLUSTER_NAME:-ray-llm-cluster}
-ZONE=${ZONE:-us-central1-a}
+ZONE=${ZONE:-us-central2-b}
 NAMESPACE=${NAMESPACE:-default}
 
 # Parse flags
@@ -45,10 +45,10 @@ fi
 
 # Install webhook
 echo "Installing webhook..."
+kubectl apply -f deployments/deployment.yaml
 kubectl apply -f deployments/webhook-svc.yaml
 kubectl apply -f deployments/mutating-webhook-cfg.yaml
 kubectl apply -f deployments/validating-webhook-cfg.yaml
-kubectl apply -f deployments/deployment.yaml
 
 # Wait for webhook to be ready
 echo "Waiting for webhook to be ready..."
