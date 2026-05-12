@@ -47,7 +47,6 @@ Use this workflow if you already have a running GKE cluster with the KubeRay TPU
 ### 1. Deploy Manifests
 Apply the RayCluster manifests to the cluster to initiate the mutating admission processes:
 ```bash
-# Mutating Webhook positive scenarios
 kubectl apply -f e2e/manifests/v6e/v6e-8-single-host.yaml
 kubectl apply -f e2e/manifests/v6e/v6e-16-multi-host.yaml
 kubectl apply -f e2e/manifests/v6e/v6e-16-multi-slice.yaml
@@ -71,11 +70,14 @@ go test -v -run TestWebhookMutation_V6eMultiHost
 # Run Megascale Multi-Slice mutation tests
 go test -v -run TestWebhookMutation_V6eMultiSlice
 
-# Run Pod Churn qualification tests
-go test -v -run TestWebhookMutation_V6ePodChurn
+# Run Single-Slice Pod Churn qualification tests (concurrently deletes 2 pods)
+go test -v -run TestWebhookMutation_V6ePodChurnSingleSlice
 
-# Run Validating Webhook rejection tests
-go test -v -run TestRayClusterValidation_InvalidTopology
+# Run Multi-Slice Pod Churn qualification tests (concurrently deletes 4 pods across slices)
+go test -v -run TestWebhookMutation_V6ePodChurnMultiSlice
+
+# Run all Validating Webhook tests for RayClusters requesting TPUs
+go test -v -run TestRayClusterValidation
 ```
 
 ---
@@ -91,10 +93,10 @@ Queries the Kubernetes API server for generated worker pods and asserts that the
 *   **Labels & Annotations**: Propagation of `replicaIndex` and native `ray.io/` indexing labels.
 *   **Topology & Affinities**: Pod co-location constraints and affinities for scheduling worker groups to node pools.
 *   **Multi-Slice Topologies**: Verifies multi-slice Megascale variable injection (`MEGASCALE_SLICE_ID`, `MEGASCALE_COORDINATOR_ADDRESS`, `MEGASCALE_PORT`) when `MEGASCALE_NUM_SLICES` is defined in the worker group specification.
-*   **Pod Churn**: Deletes an active worker pod in a running multi-host cluster, waits for the KubeRay operator to automatically re-create it, and asserts that the validating mutating webhook dynamically detects the churn and assigns the **exact same** missing `TPU_WORKER_ID` to the new pod to restore the sequential order without interrupting GKE slice coordination.
+*   **Pod Churn**: Supports both single-slice (`TestWebhookMutation_V6ePodChurnSingleSlice`) and multi-slice (`TestWebhookMutation_V6ePodChurnMultiSlice`) configurations. By concurrently deleting multiple worker pods, the tests verify that the mutating webhook fills sequence index gaps by restoring exact original `TPU_WORKER_ID` and `MEGASCALE_SLICE_ID` allocations, validating GKE TPU slice orchestration continuity.
 
 ### 2. Validation Tests (`tpu_raycluster_validation_test.go`)
-Attempts to submit invalid RayCluster manifest configurations (e.g., [v6e-invalid-topology.yaml](file:///usr/local/google/home/ryanaoleary/Desktop/forks/kuberay-tpu-webhook/e2e/manifests/v6e/v6e-invalid-topology.yaml) where `numOfHosts` is mismatched with the TPU node selector and topology spec). It asserts that:
-*   The API server **rejects** the creation of the RayCluster.
-*   The rejected message contains: `"Number of workers in worker group not equal to specified topology"`.
+Using a dynamic API client, attempts to submit various invalid RayCluster configurations to verify the admission controller's rules. It asserts rejection and checks for specific error status payloads:
+*   **`TestRayClusterValidation_InvalidTopology`**: Asserts rejection when the physical layout does not match expected TPU host ratios. Status payload: `"Number of workers in worker group not equal to specified topology"`.
+*   **`TestRayClusterValidation_MissingTopologyKey`**: Asserts rejection when the TPU worker group is missing the topology selector, triggering an internal parsing crash. Status payload: `"Failed to validate RayCluster"`.
 

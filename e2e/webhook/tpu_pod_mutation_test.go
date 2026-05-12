@@ -277,7 +277,7 @@ func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
 	assert.True(t, megascalePorts["8081"], "Unexpected Multi-slice Megascale port")
 }
 
-func TestWebhookMutation_V6ePodChurn(t *testing.T) {
+func TestWebhookMutation_V6ePodChurnSingleSlice(t *testing.T) {
 	// Setup kube client
 	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
@@ -289,7 +289,6 @@ func TestWebhookMutation_V6ePodChurn(t *testing.T) {
 		t.Fatalf("Error creating clientset: %v", err)
 	}
 
-	// We target the existing multi-host cluster
 	clusterName := "tpu-v6e-multi-host"
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", clusterName)
 
@@ -304,37 +303,40 @@ func TestWebhookMutation_V6ePodChurn(t *testing.T) {
 		initialPodNames[p.Name] = true
 	}
 
-	// 2. Find a worker pod and record its TPU_WORKER_ID and name
-	var targetPod *corev1.Pod
-	var targetWorkerID string
+	// 2. Select two worker pods (half the slice) to delete concurrently
+	var targetPods []corev1.Pod
 	for _, pod := range initialPods.Items {
 		if pod.Labels["ray.io/node-type"] == "worker" {
-			targetPod = &pod
-			for _, envVar := range pod.Spec.Containers[0].Env {
-				if envVar.Name == "TPU_WORKER_ID" {
-					targetWorkerID = envVar.Value
-					break
-				}
+			targetPods = append(targetPods, pod)
+			if len(targetPods) == 2 {
+				break
 			}
-			break
 		}
 	}
 
-	if targetPod == nil || targetWorkerID == "" {
-		t.Fatalf("Could not find any active TPU worker pod with a valid TPU_WORKER_ID")
+	if len(targetPods) < 2 {
+		t.Fatalf("Expected at least 2 worker pods in multi-host cluster, found %d", len(targetPods))
 	}
 
-	t.Logf("Targeting worker pod %s (TPU_WORKER_ID=%s) for deletion", targetPod.Name, targetWorkerID)
-
-	// 3. Delete the worker pod
-	err = clientset.CoreV1().Pods("default").Delete(context.TODO(), targetPod.Name, metav1.DeleteOptions{})
-	if err != nil {
-		t.Fatalf("Failed to delete target pod: %v", err)
+	// Record their original TPU_WORKER_IDs
+	expectedWorkerIDs := make(map[string]bool)
+	for _, pod := range targetPods {
+		wID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		expectedWorkerIDs[wID] = true
+		t.Logf("Targeting worker pod %s (TPU_WORKER_ID=%s) for deletion", pod.Name, wID)
 	}
-	t.Log("Target pod deleted. Waiting for KubeRay operator to re-create it...")
 
-	// 4. Poll and wait for the brand-new worker pod (different name than all initial pods) to be created and mutated
-	var newPod *corev1.Pod
+	// 3. Delete both worker pods concurrently
+	for _, pod := range targetPods {
+		err = clientset.CoreV1().Pods("default").Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+		if err != nil {
+			t.Fatalf("Failed to delete pod %s: %v", pod.Name, err)
+		}
+	}
+	t.Log("Target pods deleted concurrently. Waiting for KubeRay operator to re-create both...")
+
+	// 4. Poll and wait for the two brand-new worker pods to be created and mutated
+	var recreatedPods []corev1.Pod
 	for i := 0; i < 15; i++ {
 		time.Sleep(5 * time.Second)
 		currentPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
@@ -342,40 +344,141 @@ func TestWebhookMutation_V6ePodChurn(t *testing.T) {
 			t.Fatalf("Failed to list pods during churn polling: %v", err)
 		}
 
+		recreatedPods = nil
 		for _, p := range currentPods.Items {
-			// Newly created pod should have a name that wasn't in the initial set of pod names
 			if p.Labels["ray.io/node-type"] == "worker" && !initialPodNames[p.Name] {
-				// Check if this pod has env TPU_WORKER_ID set
-				for _, envVar := range p.Spec.Containers[0].Env {
-					if envVar.Name == "TPU_WORKER_ID" {
-						newPod = &p
-						break
-					}
+				if hasEnvVar(p.Spec.Containers[0].Env, "TPU_WORKER_ID") {
+					recreatedPods = append(recreatedPods, p)
 				}
 			}
 		}
-		if newPod != nil {
+		if len(recreatedPods) == 2 {
 			break
 		}
-		t.Log("Waiting for re-created pod to be generated and mutated...")
+		t.Logf("Waiting for recreated pods to be mutated... (found %d/2)", len(recreatedPods))
 	}
 
-	if newPod == nil {
-		t.Fatalf("Timed out waiting for the re-created worker pod to be generated")
+	if len(recreatedPods) != 2 {
+		t.Fatalf("Timed out waiting for the recreated worker pods. Found %d/2", len(recreatedPods))
 	}
 
-	// 5. Assert that the new pod got the SAME TPU_WORKER_ID to fill the gap!
-	var assignedWorkerID string
-	for _, envVar := range newPod.Spec.Containers[0].Env {
-		if envVar.Name == "TPU_WORKER_ID" {
-			assignedWorkerID = envVar.Value
-			break
-		}
+	// 5. Assert that the new pods got the same TPU_WORKER_IDs as before the churn
+	for _, pod := range recreatedPods {
+		assignedID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		t.Logf("Re-created pod name: %s, Assigned TPU_WORKER_ID: %s", pod.Name, assignedID)
+		assert.True(t, expectedWorkerIDs[assignedID], "Re-created pod TPU_WORKER_ID %s was not in the original expected IDs", assignedID)
 	}
-
-	t.Logf("Re-created pod name: %s, Assigned TPU_WORKER_ID: %s", newPod.Name, assignedWorkerID)
-	assert.Equal(t, targetWorkerID, assignedWorkerID, "Re-created pod must be assigned the exact same TPU_WORKER_ID to preserve 0 to N-1 sequences during pod churn")
 }
+
+func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
+	// Setup kube client
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		t.Fatalf("Error creating clientset: %v", err)
+	}
+
+	clusterName := "tpu-v6e-multi-slice"
+	labelSelector := fmt.Sprintf("ray.io/cluster=%s", clusterName)
+
+	// 1. Get initial pods and track their names
+	initialPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil || len(initialPods.Items) == 0 {
+		t.Skip("Skipping pod churn test: No multi-slice pods found in default namespace.")
+	}
+
+	initialPodNames := make(map[string]bool)
+	for _, p := range initialPods.Items {
+		initialPodNames[p.Name] = true
+	}
+
+	// 2. Target four worker pods: two in slice 0, and two in slice 1
+	var targetPods []corev1.Pod
+	var slice0Targets, slice1Targets []corev1.Pod
+
+	for _, pod := range initialPods.Items {
+		if pod.Labels["ray.io/node-type"] == "worker" {
+			sliceID := getEnvVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
+			if sliceID == "0" && len(slice0Targets) < 2 {
+				slice0Targets = append(slice0Targets, pod)
+			} else if sliceID == "1" && len(slice1Targets) < 2 {
+				slice1Targets = append(slice1Targets, pod)
+			}
+		}
+	}
+
+	if len(slice0Targets) < 2 || len(slice1Targets) < 2 {
+		t.Fatalf("Could not select exactly 2 target worker pods from both slice 0 and slice 1")
+	}
+
+	targetPods = append(targetPods, slice0Targets...)
+	targetPods = append(targetPods, slice1Targets...)
+
+	// Record original SliceID and WorkerID mappings
+	expectedPodMappings := make(map[string]map[string]bool)
+	expectedPodMappings["0"] = make(map[string]bool)
+	expectedPodMappings["1"] = make(map[string]bool)
+
+	for _, pod := range targetPods {
+		sliceID := getEnvVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
+		wID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		expectedPodMappings[sliceID][wID] = true
+		t.Logf("Targeting multi-slice worker pod %s (Slice=%s, TPU_WORKER_ID=%s) for deletion", pod.Name, sliceID, wID)
+	}
+
+	// 3. Delete all four worker pods concurrently
+	for _, pod := range targetPods {
+		err = clientset.CoreV1().Pods("default").Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
+		if err != nil {
+			t.Fatalf("Failed to delete pod %s: %v", pod.Name, err)
+		}
+	}
+	t.Log("Target pods deleted concurrently. Waiting for KubeRay operator to re-create all four...")
+
+	// 4. Poll and wait for all four new worker pods to be created and mutated
+	var recreatedPods []corev1.Pod
+	for i := 0; i < 15; i++ {
+		time.Sleep(5 * time.Second)
+		currentPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			t.Fatalf("Failed to list pods during churn polling: %v", err)
+		}
+
+		recreatedPods = nil
+		for _, p := range currentPods.Items {
+			if p.Labels["ray.io/node-type"] == "worker" && !initialPodNames[p.Name] {
+				if hasEnvVar(p.Spec.Containers[0].Env, "TPU_WORKER_ID") && hasEnvVar(p.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID") {
+					recreatedPods = append(recreatedPods, p)
+				}
+			}
+		}
+		if len(recreatedPods) == 4 {
+			break
+		}
+		t.Logf("Waiting for recreated multi-slice pods... (found %d/4)", len(recreatedPods))
+	}
+
+	if len(recreatedPods) != 4 {
+		t.Fatalf("Timed out waiting for the recreated worker pods in multi-slice cluster. Found %d/4", len(recreatedPods))
+	}
+
+	// 5. Assert that each recreated pod got its original TPU_WORKER_ID under the correct MEGASCALE_SLICE_ID
+	for _, pod := range recreatedPods {
+		sliceID := getEnvVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
+		assignedID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		t.Logf("Re-created multi-slice pod name: %s, Assigned Slice: %s, TPU_WORKER_ID: %s", pod.Name, sliceID, assignedID)
+
+		originalExpectedIDs, exists := expectedPodMappings[sliceID]
+		assert.True(t, exists, "Recreated pod assigned to unexpected sliceID: %s", sliceID)
+		assert.True(t, originalExpectedIDs[assignedID], "Recreated pod in slice %s with TPU_WORKER_ID %s was not in the original expected set", sliceID, assignedID)
+	}
+}
+
+// Helper functions
 
 func hasEnvVar(envVars []corev1.EnvVar, name string) bool {
 	for _, env := range envVars {
