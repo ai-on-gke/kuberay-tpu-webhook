@@ -61,11 +61,9 @@ type slice struct {
 // TPUWebhookServer is a KubeRay TPU webhook server instance.
 type TPUWebhookServer struct {
 	// podLister is used to query Pods from an informer cache.
-	podLister    listersv1.PodLister
-	cacheMutex   sync.Mutex
-	wg           sync.WaitGroup
-	waiting      int
-	lastAdmitted string
+	podLister   listersv1.PodLister
+	cacheMutex  sync.Mutex
+	podMutateMu *podSyncLocker
 }
 
 // patch is a JSON patch describing mutate operation(s) for an incoming object.
@@ -98,7 +96,8 @@ var (
 
 func NewTPUWebhookServer(podLister listersv1.PodLister) *TPUWebhookServer {
 	return &TPUWebhookServer{
-		podLister: podLister,
+		podLister:   podLister,
+		podMutateMu: newPodSyncLocker(),
 	}
 }
 
@@ -811,19 +810,15 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		}
 	} else {
 		// Fallback for older KubeRay versions that do not set K8s index labels.
-		// Wait for PodInformer cache to update from previous requests or timeout.
-		if waitTimeout(&t.wg, time.Second*1) {
-			klog.V(1).Info("MutatePod", "PodInformer AddFunc called for prior admission request")
-		} else {
-			klog.V(1).Info("MutatePod", "Timed out waiting for PodInformer AddFunc")
-		}
-		// Add 1 to the WaitGroup to represent the pending Pod to the cache
-		defer t.wg.Add(1)
-		t.waiting += 1
+		// CRITICAL SECTION: Calculating the replica index, pod slice, and
+		// worker ID must happen one at a time with an up-to-date cache.
+		// Wait for PodInformer cache to update from previous requests.
+		t.podMutateMu.Lock()
 
 		// query k8s client to populate sliceToTPUHosts
 		sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
 		if err != nil {
+			t.podMutateMu.Unlock()
 			return nil, err
 		}
 
@@ -831,11 +826,13 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
 		tpuWorkerID, err = getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
 		if err != nil {
+			t.podMutateMu.Unlock()
 			return nil, err
 		}
 
-		// Update state for next request
-		t.lastAdmitted = fmt.Sprintf("%s-%s-%d-%d", namespace, clusterName, replicaIndex, tpuWorkerID)
+		// Update state for next request and release lock.
+		t.podMutateMu.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
+		t.podMutateMu.Unlock()
 
 		// Manually inject the replicaIndex label
 		injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
@@ -1076,68 +1073,96 @@ func init() {
 	klog.InitFlags(nil)
 }
 
-// isLastAdmittedPod returns True if Pod matches the last Pod admitted by the webhook server
-func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
-	if pod.Spec.Containers == nil || !containerRequestingTPUs(pod.Spec.Containers...) {
-		// Pod does not use TPUs
-		return false, nil
-	}
-	replicaIndex := pod.Labels[legacyReplicaIndexLabelKey]
-	if replicaIndex == "" {
-		// Pod was not mutated by the webhook
-		return false, nil
-	}
-	clusterName := pod.Labels[utils.RayClusterLabelKey]
-	if clusterName == "" {
-		return false, errors.New("Ray Pod created by KubeRay missing RayCluster label")
-	}
-	namespace := pod.Namespace
-	for _, container := range pod.Spec.Containers {
-		if !containerRequestingTPUs(container) {
-			// Skip to the next container
-			continue
-		}
-		tpuWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
-		if tpuWorkerID == "" {
-			// TPU pod was not intercepted by the webhook
-			return false, nil
-		}
-		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
-		if uniquePodID == t.lastAdmitted {
-			// Pod matches the last TPU worker Pod intercepted by the webhook server
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // addPod allows next goroutine to start once the webhook PodInformer cache updates
 func (t *TPUWebhookServer) addPod(obj interface{}) {
 	pod := obj.(*corev1.Pod)
 	klog.V(1).InfoS("addPod", "Pod", pod.Namespace+"/"+pod.Name, "Time", time.Now())
 
-	if t.lastAdmitted == "" {
-		// There is not a pending TPU worker Pod to the informer cache, unblock if waiting and return
-		for t.waiting > 0 {
-			t.wg.Done()
-			t.waiting -= 1
+	if pod.Spec.Containers == nil || !containerRequestingTPUs(pod.Spec.Containers...) {
+		// Pod does not use TPUs.
+	}
+	replicaIndex := pod.Labels[legacyReplicaIndexLabelKey]
+	if replicaIndex == "" {
+		// Pod was not mutated by the webhook.
+		return
+	}
+	clusterName := pod.Labels[utils.RayClusterLabelKey]
+	if clusterName == "" {
+		klog.V(1).InfoS("Ray Pod created by KubeRay missing RayCluster label")
+		return
+	}
+	namespace := pod.Namespace
+	for _, container := range pod.Spec.Containers {
+		if !containerRequestingTPUs(container) {
+			// Skip to the next container.
+			continue
 		}
-		return
+		tpuWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
+		if tpuWorkerID == "" {
+			// TPU pod was not intercepted by the webhook
+			continue
+		}
+		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
+
+		// Inform the cache control mechanism of the pod id.
+		t.podMutateMu.Receive(uniquePodID)
 	}
-	if t.waiting == 0 {
-		// Webhook is not waiting, no-op
-		return
+}
+
+// podSyncLocker provides a lock that allows the mutating webhook to guarantee
+// only one pod is mutated at a time and the cache is valid during requests.
+type podSyncLocker struct {
+	m            sync.Mutex
+	cond         *sync.Cond
+	synced       bool
+	lastAdmitted string
+}
+
+func newPodSyncLocker() *podSyncLocker {
+	c := &podSyncLocker{
+		synced: true,
 	}
-	// Check if Pod in cache is the last admitted TPU Pod
-	isLastAdmitted, err := t.isLastAdmittedPod(pod)
-	if err != nil {
-		klog.Errorf("Invalid addPod: %s", err)
-		return
+	c.cond = sync.NewCond(&c.m)
+	return c
+}
+
+// Lock blocks until both all callers release the lock and the cache is
+// up-to-date.
+func (c *podSyncLocker) Lock() {
+	// Acquire the lock (which must be held to block on the condition) as well
+	// as to guarantee only one mutate request is in-flight.
+	// If the cache is not synced, block on the condition for it to become
+	// synced.
+	c.m.Lock()
+	for !c.synced {
+		c.cond.Wait()
 	}
-	if isLastAdmitted {
-		// Informer cache has been updated, unblock the next Mutate call
-		t.wg.Done()
-		t.waiting -= 1
+}
+
+// Admit invalidates the cache and blocks Lock until the admitted pod has synced
+// to the cache. The lock must be held.
+func (c *podSyncLocker) Admit(pod string) {
+	c.synced = false
+	c.lastAdmitted = pod
+}
+
+// Unlock releases the lock.
+func (c *podSyncLocker) Unlock() {
+	c.m.Unlock()
+}
+
+// Receive marks a pod as received in the cache. The lock does not need to be
+// held.
+func (c *podSyncLocker) Receive(pod string) {
+	c.m.Lock()
+	defer c.m.Unlock()
+	// If the pod received by the informer matches the one we last admitted --
+	// and were waiting for -- then we can mark the cache as synced and wake one
+	// in-flight request.
+	if pod == c.lastAdmitted {
+		c.synced = true
+		c.lastAdmitted = ""
+		c.cond.Signal()
 	}
 }
 
