@@ -55,19 +55,15 @@ func TestWebhookMutation_V6eSingleHost(t *testing.T) {
 		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
-	// Load manifest
 	rayCluster := loadManifest(t, "../manifests/v6e/v6e-8-single-host.yaml")
 
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
 	t.Logf("Looking for pods with selector: %s", labelSelector)
 
-	// Wait for pods
 	pods := waitForPods(t, labelSelector, 2)
 
-	// Verify mutations
 	for _, pod := range pods.Items {
 		if pod.Labels["ray.io/node-type"] == "worker" {
-			// Verify env vars
 			envVars := pod.Spec.Containers[0].Env
 			assert.True(t, hasEnvVar(envVars, "TPU_WORKER_ID"), "Missing TPU_WORKER_ID")
 			assert.True(t, hasEnvVar(envVars, "TPU_NAME"), "Missing TPU_NAME")
@@ -83,16 +79,13 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
-	// Load manifest
 	rayCluster := loadManifest(t, "../manifests/v6e/v6e-16-multi-host.yaml")
 
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
 	t.Logf("Looking for pods with selector: %s", labelSelector)
 
-	// Wait for pods
 	pods := waitForPods(t, labelSelector, 5)
 
-	// Collect values
 	workerIds := make(map[string]bool)
 	tpuNames := make(map[string]bool)
 	replicaIndices := make(map[string]bool)
@@ -103,7 +96,6 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 			numWorkerPods++
 			envVars := pod.Spec.Containers[0].Env
 
-			// Extract values
 			workerId := envVarValue(envVars, "TPU_WORKER_ID")
 			tpuName := envVarValue(envVars, "TPU_NAME")
 
@@ -113,22 +105,18 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 			workerIds[workerId] = true
 			tpuNames[tpuName] = true
 
-			// Check labels
 			replicaIndex := pod.Labels["replicaIndex"]
 			assert.NotEmpty(t, replicaIndex, "replicaIndex label is missing")
 			replicaIndices[replicaIndex] = true
 
-			// Verify subdomain and hostname
 			assert.NotEmpty(t, pod.Spec.Subdomain, "Subdomain not set")
 			assert.NotEmpty(t, pod.Spec.Hostname, "Hostname not set")
 
-			// Verify Pod Affinity
 			assert.NotNil(t, pod.Spec.Affinity, "Affinity not set")
 			assert.NotNil(t, pod.Spec.Affinity.PodAntiAffinity, "PodAntiAffinity not set")
 		}
 	}
 
-	// Assertions
 	assert.Equal(t, 4, numWorkerPods, "Expected 4 worker pods for v6e multi-host fixture")
 	assert.Equal(t, 4, len(workerIds), "TPU_WORKER_ID values are not unique")
 
@@ -145,16 +133,13 @@ func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
 		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
-	// Load manifest
 	rayCluster := loadManifest(t, "../manifests/v6e/v6e-16-multi-slice.yaml")
 
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
 	t.Logf("Looking for pods with selector: %s", labelSelector)
 
-	// Wait for pods
 	pods := waitForPods(t, labelSelector, 9)
 
-	// Collect multi-slice validation values
 	numWorkerPods := 0
 	sliceIds := make(map[string]int)
 	coordinatorAddresses := make(map[string]bool)
@@ -180,7 +165,6 @@ func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
 		}
 	}
 
-	// Assertions
 	assert.Equal(t, 8, numWorkerPods, "Expected 8 worker pods (2 slices of 4 hosts)")
 	assert.Equal(t, 2, len(sliceIds), "Expected 2 distinct slice IDs (0 and 1)")
 	assert.Equal(t, 4, sliceIds["0"], "Expected 4 worker pods in slice 0")
