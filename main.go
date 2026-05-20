@@ -796,7 +796,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	} else {
 		// Fallback for older KubeRay versions that do not set K8s index labels.
 		// Wait for PodInformer cache to update from previous requests.
-		timedout := t.cacheCond.Wait(2 * time.Second)
+		timedout := t.cacheCond.Wait(1 * time.Second)
 		if timedout {
 			klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
 		}
