@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	"github.com/stretchr/testify/assert"
@@ -1387,12 +1388,12 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 		lastAdmitted   string
 		isLastAdmitted bool
 		expectedError  error
+		useMutate      bool
 	}{
 		"isLastAdmittedPod Pod missing RayCluster label": {
 			// missing Ray cluster label - returns error
-			testPod:        getTestCPUWorker("", "test-group", "test-namespace"),
-			expectedError:  errors.New("Ray Pod created by KubeRay missing RayCluster label"),
-			isLastAdmitted: false,
+			testPod:       getTestCPUWorker("", "test-group", "test-namespace"),
+			expectedError: errors.New("Ray Pod created by KubeRay missing RayCluster label"),
 		},
 		"isLastAdmittedPod Pod does not request TPUs": {
 			// pod is not a TPU pod, should return false
@@ -1410,32 +1411,58 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 		"isLastAdmittedPod TPU Pod matches lastAdmitted": {
 			// TPU pod matches lastAdmitted, return true
 			testPod:        getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v6e-slice", "4x4", "4"),
-			testWorkerID:   "0",
-			testReplicaID:  "test-group-0",
-			lastAdmitted:   "test-namespace-test-cluster-test-group-0-0",
 			isLastAdmitted: true,
+			useMutate:      true,
 		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			// set TPU_WORKER_ID for testPod
-			if containerRequestingTPUs(tc.testPod.Spec.Containers...) {
-				if tc.testReplicaID != "" {
-					tc.testPod.Labels[legacyReplicaIndexLabelKey] = tc.testReplicaID
-					tc.testPod.Spec.Containers[0].Env = []corev1.EnvVar{
-						{
-							Name:  "TPU_WORKER_ID",
-							Value: tc.testWorkerID,
-						},
+			testPod := tc.testPod.DeepCopy()
+
+			// set up TPUWebhookServer
+			testPodLister := setupInformer(testPod)
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
+
+			if tc.useMutate {
+				// Prepare admission review
+				admissionReview := getTestAdmissionReview("Pod", "CREATE")
+				jsonPod, _ := json.Marshal(testPod)
+				admissionReview.Request.Object.Raw = jsonPod
+				admissionReview.Request.Object.Object = testPod
+
+				// Mutate the pod. This will set tpuWebhookServer.lastAdmitted.
+				resp, err := tpuWebhookServer.mutatePod(admissionReview)
+				assert.NoError(t, err)
+				assert.NotNil(t, resp)
+
+				// Apply patches to the pod so isLastAdmittedPod can find labels/env vars.
+				patch, err := jsonpatch.DecodePatch(resp.Patch)
+				assert.NoError(t, err)
+
+				podBytes, _ := json.Marshal(testPod)
+				modifiedPodBytes, err := patch.Apply(podBytes)
+				assert.NoError(t, err)
+
+				var modifiedPod corev1.Pod
+				json.Unmarshal(modifiedPodBytes, &modifiedPod)
+				testPod = &modifiedPod
+			} else {
+				// set TPU_WORKER_ID for testPod
+				if containerRequestingTPUs(testPod.Spec.Containers...) {
+					if tc.testReplicaID != "" {
+						testPod.Labels[legacyReplicaIndexLabelKey] = tc.testReplicaID
+						testPod.Spec.Containers[0].Env = []corev1.EnvVar{
+							{
+								Name:  "TPU_WORKER_ID",
+								Value: tc.testWorkerID,
+							},
+						}
 					}
 				}
+				tpuWebhookServer.lastAdmitted = tc.lastAdmitted
 			}
-			// set up TPUWebhookServer
-			testPodLister := setupInformer(tc.testPod)
-			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
-			tpuWebhookServer.lastAdmitted = tc.lastAdmitted
 
-			isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(tc.testPod)
+			isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
 			if err != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
