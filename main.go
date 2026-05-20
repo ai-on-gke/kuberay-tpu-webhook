@@ -835,7 +835,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		}
 
 		// Update state for next request
-		t.lastAdmitted = fmt.Sprintf("%s-%s-%d-%d", namespace, clusterName, replicaIndex, tpuWorkerID)
+		t.lastAdmitted = fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID)
 
 		// Manually inject the replicaIndex label
 		injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
