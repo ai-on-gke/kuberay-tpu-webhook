@@ -1465,7 +1465,7 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 						}
 					}
 				}
-				tpuWebhookServer.podMutateMu.lastAdmitted = tc.lastAdmitted
+				tpuWebhookServer.cacheCond.lastAdmitted = tc.lastAdmitted
 			}
 
 			//isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
