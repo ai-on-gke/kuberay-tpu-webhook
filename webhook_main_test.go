@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
@@ -2076,136 +2077,139 @@ func Test_MutatePod_V7x(t *testing.T) {
 }
 
 func TestMutatePodLoad(t *testing.T) {
-	// Parameters for the load test
-	numCreations := 50
-	numDeletions := 20
-	clusterName := "load-test-cluster"
-	groupName := "tpu-group"
-	namespace := "default"
+	synctest.Test(t, func(t *testing.T) {
+		// Parameters for the load test
+		numCreations := 50
+		numDeletions := 20
+		clusterName := "load-test-cluster"
+		groupName := "tpu-group"
+		namespace := "default"
 
-	// Setup fake clientset and informer
-	fakeClient := fake.NewSimpleClientset()
-	factory := informers.NewSharedInformerFactory(fakeClient, 0)
-	podInformer := factory.Core().V1().Pods().Informer()
-	podLister := factory.Core().V1().Pods().Lister()
+		// Setup fake clientset and informer
+		fakeClient := fake.NewSimpleClientset()
+		// Use a non-zero resync period to avoid hitting non-bubbled global channels in client-go
+		factory := informers.NewSharedInformerFactory(fakeClient, 12*time.Hour)
+		podInformer := factory.Core().V1().Pods().Informer()
+		podLister := factory.Core().V1().Pods().Lister()
 
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	factory.Start(stopCh)
-	cache.WaitForCacheSync(stopCh, podInformer.HasSynced)
+		stopCh := make(chan struct{})
+		defer close(stopCh)
+		factory.Start(stopCh)
+		synctest.Wait()
 
-	tpuWebhookServer := NewTPUWebhookServer(podLister)
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: tpuWebhookServer.addPod,
-	})
+		tpuWebhookServer := NewTPUWebhookServer(podLister)
+		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: tpuWebhookServer.addPod,
+		})
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	createdPods := make(map[string]*corev1.Pod)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		createdPods := make(map[string]*corev1.Pod)
 
-	// Channel to track pods ready for deletion
-	toDelete := make(chan string, numCreations)
+		// Channel to track pods ready for deletion
+		toDelete := make(chan string, numCreations)
 
-	// 1. Goroutine for concurrent creations
-	wg.Add(numCreations)
-	for i := 0; i < numCreations; i++ {
-		go func(id int) {
-			defer wg.Done()
+		// 1. Goroutine for concurrent creations
+		wg.Add(numCreations)
+		for i := 0; i < numCreations; i++ {
+			go func(id int) {
+				defer wg.Done()
 
-			pod := getTestTPUWorker(clusterName, groupName, namespace, "tpu-v4-podslice", "2x2x2", "4")
-			pod.Name = fmt.Sprintf("pod-%d", id)
+				pod := getTestTPUWorker(clusterName, groupName, namespace, "tpu-v4-podslice", "2x2x2", "4")
+				pod.Name = fmt.Sprintf("pod-%d", id)
 
-			admissionReview := getTestAdmissionReview("Pod", "CREATE")
-			jsonPod, _ := json.Marshal(pod)
-			admissionReview.Request.Object.Raw = jsonPod
-			admissionReview.Request.Object = runtime.RawExtension{Object: pod}
-			admissionReview.Request.Namespace = namespace
+				admissionReview := getTestAdmissionReview("Pod", "CREATE")
+				jsonPod, _ := json.Marshal(pod)
+				admissionReview.Request.Object.Raw = jsonPod
+				admissionReview.Request.Object = runtime.RawExtension{Object: pod}
+				admissionReview.Request.Namespace = namespace
 
-			body, _ := json.Marshal(admissionReview)
-			req := httptest.NewRequest("POST", "/mutate", bytes.NewReader(body))
-			w := httptest.NewRecorder()
+				body, _ := json.Marshal(admissionReview)
+				req := httptest.NewRequest("POST", "/mutate", bytes.NewReader(body))
+				w := httptest.NewRecorder()
 
-			tpuWebhookServer.Mutate(w, req)
+				tpuWebhookServer.Mutate(w, req)
 
-			if w.Code != http.StatusOK {
-				t.Errorf("Mutation failed for pod %d: %s", id, w.Body.String())
-				return
-			}
+				if w.Code != http.StatusOK {
+					t.Errorf("Mutation failed for pod %d: %s", id, w.Body.String())
+					return
+				}
 
-			var resp admissionv1.AdmissionReview
-			json.Unmarshal(w.Body.Bytes(), &resp)
+				var resp admissionv1.AdmissionReview
+				json.Unmarshal(w.Body.Bytes(), &resp)
 
-			// Apply patches to the pod
-			patchedPod := applyPatches(t, pod, resp.Response.Patch)
+				// Apply patches to the pod
+				patchedPod := applyPatches(t, pod, resp.Response.Patch)
 
-			// Persist to fake client (triggers informer AddFunc)
-			_, err := fakeClient.CoreV1().Pods(namespace).Create(context.TODO(), patchedPod, metav1.CreateOptions{})
-			if err != nil {
-				t.Errorf("Failed to create pod in fake client: %v", err)
-				return
-			}
-
-			mu.Lock()
-			createdPods[patchedPod.Name] = patchedPod
-			mu.Unlock()
-
-			toDelete <- patchedPod.Name
-		}(i)
-	}
-
-	// 2. Goroutine for concurrent deletions
-	var delWg sync.WaitGroup
-	delWg.Add(numDeletions)
-	go func() {
-		for i := 0; i < numDeletions; i++ {
-			podName := <-toDelete
-			go func(name string) {
-				defer delWg.Done()
-				// Simulate some delay
-				time.Sleep(10 * time.Millisecond)
-				err := fakeClient.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+				// Persist to fake client (triggers informer AddFunc)
+				_, err := fakeClient.CoreV1().Pods(namespace).Create(context.TODO(), patchedPod, metav1.CreateOptions{})
 				if err != nil {
-					t.Errorf("Failed to delete pod %s: %v", name, err)
+					t.Errorf("Failed to create pod in fake client: %v", err)
+					return
 				}
+
 				mu.Lock()
-				delete(createdPods, name)
+				createdPods[patchedPod.Name] = patchedPod
 				mu.Unlock()
-			}(podName)
+
+				toDelete <- patchedPod.Name
+			}(i)
 		}
-	}()
 
-	wg.Wait()
-	delWg.Wait()
+		// 2. Goroutine for concurrent deletions
+		var delWg sync.WaitGroup
+		delWg.Add(numDeletions)
+		go func() {
+			for i := 0; i < numDeletions; i++ {
+				podName := <-toDelete
+				go func(name string) {
+					defer delWg.Done()
+					// Simulate some delay
+					time.Sleep(10 * time.Millisecond)
+					err := fakeClient.CoreV1().Pods(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+					if err != nil {
+						t.Errorf("Failed to delete pod %s: %v", name, err)
+					}
+					mu.Lock()
+					delete(createdPods, name)
+					mu.Unlock()
+				}(podName)
+			}
+		}()
 
-	// Wait for informer to catch up
-	time.Sleep(500 * time.Millisecond)
+		wg.Wait()
+		delWg.Wait()
 
-	// Final verification
-	finalPods, _ := fakeClient.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
-	expectedCount := numCreations - numDeletions
-	assert.Equal(t, expectedCount, len(finalPods.Items), "Final pod count mismatch")
+		// Wait for informer to catch up
+		synctest.Wait()
 
-	workerIDs := make(map[string]bool)
-	for _, p := range finalPods.Items {
-		replicaIndex := p.Labels[legacyReplicaIndexLabelKey]
-		// Find TPU_WORKER_ID in env
-		var workerID string
-		for _, c := range p.Spec.Containers {
-			for _, env := range c.Env {
-				if env.Name == "TPU_WORKER_ID" {
-					workerID = env.Value
-					break
+		// Final verification
+		finalPods, _ := fakeClient.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{})
+		expectedCount := numCreations - numDeletions
+		assert.Equal(t, expectedCount, len(finalPods.Items), "Final pod count mismatch")
+
+		workerIDs := make(map[string]bool)
+		for _, p := range finalPods.Items {
+			replicaIndex := p.Labels[legacyReplicaIndexLabelKey]
+			// Find TPU_WORKER_ID in env
+			var workerID string
+			for _, c := range p.Spec.Containers {
+				for _, env := range c.Env {
+					if env.Name == "TPU_WORKER_ID" {
+						workerID = env.Value
+						break
+					}
 				}
 			}
-		}
 
-		key := fmt.Sprintf("%s-%s", replicaIndex, workerID)
-		if workerIDs[key] {
-			t.Errorf("Duplicate (replicaIndex, TPU_WORKER_ID) found: %s", key)
+			key := fmt.Sprintf("%s-%s", replicaIndex, workerID)
+			if workerIDs[key] {
+				t.Errorf("Duplicate (replicaIndex, TPU_WORKER_ID) found: %s", key)
+			}
+			workerIDs[key] = true
+			klog.Infof("Pod %s: %s", p.Name, key)
 		}
-		workerIDs[key] = true
-		klog.Infof("Pod %s: %s", p.Name, key)
-	}
+	})
 }
 
 // applyPatches is a crude way to apply JSON patches for testing purposes
