@@ -31,6 +31,10 @@ vet:
 # Run go test against code.
 test:
 	go test ./...
+
+# Run E2E tests.
+e2e:
+	./scripts/run-e2e.sh
   
 uninstall:  
 	kubectl delete -f deployments/
@@ -52,3 +56,6 @@ deploy-cert:
 
 uninstall-cert:
 	kubectl delete -f certs/
+
+.PHONY: webhook run fmt vet test e2e deploy uninstall docker-build docker-push deploy-cert uninstall-cert
+

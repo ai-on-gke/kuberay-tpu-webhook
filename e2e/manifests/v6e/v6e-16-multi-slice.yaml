@@ -1,0 +1,38 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: tpu-v6e-multi-slice
+spec:
+  headGroupSpec:
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:2.55.0
+          resources:
+            requests:
+              cpu: "1"
+            limits:
+              cpu: "1"
+  workerGroupSpecs:
+  - replicas: 2
+    minReplicas: 2
+    maxReplicas: 2
+    groupName: tpu-worker-group
+    numOfHosts: 4
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:2.55.0
+          env:
+          - name: MEGASCALE_NUM_SLICES
+            value: "2"
+          resources:
+            requests:
+              google.com/tpu: "4"
+            limits:
+              google.com/tpu: "4"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+          cloud.google.com/gke-tpu-topology: 4x4
