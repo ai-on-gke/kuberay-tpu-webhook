@@ -1115,42 +1115,46 @@ func (t *TPUWebhookServer) addPod(obj interface{}) {
 // podSyncLocker provides a lock that allows the mutating webhook to guarantee
 // only one pod is mutated at a time and the cache is valid during requests.
 type podSyncLocker struct {
-	m      sync.Mutex
-	cond   *sync.Cond
-	synced bool
-
-	// lastAdmitted and cacheInvalidated are only valid when synced is false.
-	// lastAdmitted is the pod ID that needs to hit the informer, and
-	// cacheInvalidated is the time at which we started waiting for it.
-	lastAdmitted     string
-	cacheInvalidated time.Time
+	m            sync.Mutex
+	wakeChan     chan struct{}
+	synced       bool
+	lastAdmitted string
 }
 
 func newPodSyncLocker() *podSyncLocker {
 	c := &podSyncLocker{
-		synced: true,
+		wakeChan: make(chan struct{}),
+		synced:   true,
 	}
-	c.cond = sync.NewCond(&c.m)
 	return c
 }
 
 // Lock blocks until both all callers release the lock and the cache is
 // up-to-date.
 func (c *podSyncLocker) Lock(timeout time.Duration) (timedout bool) {
-	// Acquire the lock (which must be held to block on the condition) as well
-	// as to guarantee only one mutate request is in-flight.
-	// If the cache is not synced, block on the condition for it to become
-	// synced.
+	// The lock must be held
+	// 1. While reading or writing c.synced, and
+	// 2. When the function exits.
+	// The lock does not need to be held while waiting for the cache sync or the
+	// timout.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	c.m.Lock()
-	for !c.synced {
-		// If it has been too long between when the cache was marked invalid and
-		// now, then bail and proceed with a stale cache.
-		if time.Now().Sub(c.cacheInvalidated) > timeout {
-			klog.V(0).Infof("Waiting for pod %q admitted at %s timed out; proceeding with dirty cache", c.lastAdmitted, c.cacheInvalidated)
+	for !c.synced { // Lock is held while reading state.
+		c.m.Unlock() // Release lock while waiting to be unblocked.
+		select {
+		case <-c.wakeChan:
+			c.m.Lock()
+			continue // Try checking t.synced again with lock held.
+		case <-timer.C:
+			// If cache does not sync within the timeout, assume the
+			// lastAdmitted pod will never appear. Release the cache sync bit
+			// and return.
+			c.m.Lock()
+			klog.V(0).Infof("Timed out waiting for pod %q to be added to cache", c.lastAdmitted)
 			c.synced = true
 			return true
 		}
-		c.cond.Wait()
 	}
 	return false
 }
@@ -1160,7 +1164,6 @@ func (c *podSyncLocker) Lock(timeout time.Duration) (timedout bool) {
 func (c *podSyncLocker) Admit(pod string) {
 	c.synced = false
 	c.lastAdmitted = pod
-	c.cacheInvalidated = time.Now()
 }
 
 // Unlock releases the lock.
@@ -1179,7 +1182,13 @@ func (c *podSyncLocker) Receive(pod string) {
 	if pod == c.lastAdmitted {
 		c.synced = true
 		c.lastAdmitted = ""
-		c.cond.Signal()
+
+		// Wake by sending to wakeChan. Select with an empty default allows us
+		// to skip if there is no blocked request.
+		select {
+		case c.wakeChan <- struct{}{}:
+		default:
+		}
 	}
 }
 
