@@ -330,7 +330,7 @@ func injectSubdomain(clusterName string, patches *[]patch) {
 
 // injectReplicaLabel injects replicaIndex label into a Pod for TPU Pod scheduling and Ray multi-host autoscaling
 func injectReplicaLabel(clusterName string, namespace string, replicaIndex int, workerGroupName string, patches *[]patch) {
-	labelPatch := patch{"op": "replace"}
+	labelPatch := patch{"op": "add"}
 	labelPath := "/metadata/labels/replicaIndex"
 	replicaLabelValue := fmt.Sprintf("%s-%d", workerGroupName, replicaIndex)
 
