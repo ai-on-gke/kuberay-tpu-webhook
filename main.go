@@ -1063,6 +1063,7 @@ func (t *TPUWebhookServer) addPod(obj interface{}) {
 
 	if pod.Spec.Containers == nil || !containerRequestingTPUs(pod.Spec.Containers...) {
 		// Pod does not use TPUs.
+		return
 	}
 	replicaIndex := pod.Labels[legacyReplicaIndexLabelKey]
 	if replicaIndex == "" {
@@ -1104,7 +1105,7 @@ type podSyncCond struct {
 
 func newPodSyncCond() *podSyncCond {
 	c := &podSyncCond{
-		wakeChan: make(chan struct{}),
+		wakeChan: make(chan struct{}, 1),
 		synced:   true,
 	}
 	return c
@@ -1135,6 +1136,17 @@ func (c *podSyncCond) Wait(timeout time.Duration) (timedout bool) {
 			klog.V(0).Infof("Timed out waiting for pod %q to be added to cache", c.lastAdmitted)
 			c.synced = true
 			return true
+		}
+	}
+
+	// Drain wakeChan of any pre-buffered events that were waiting before Wait
+	// was called.
+drain:
+	for {
+		select {
+		case <-c.wakeChan:
+		default:
+			break drain
 		}
 	}
 	return false
