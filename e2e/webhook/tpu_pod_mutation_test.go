@@ -62,7 +62,7 @@ func TestWebhookMutation_V6eSingleHost(t *testing.T) {
 	t.Logf("Looking for pods with selector: %s", labelSelector)
 
 	// Wait for pods
-	pods := waitForPods(t, labelSelector)
+	pods := waitForPods(t, labelSelector, 2)
 
 	// Verify mutations
 	for _, pod := range pods.Items {
@@ -90,7 +90,7 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 	t.Logf("Looking for pods with selector: %s", labelSelector)
 
 	// Wait for pods
-	pods := waitForPods(t, labelSelector)
+	pods := waitForPods(t, labelSelector, 5)
 
 	// Collect values
 	workerIds := make(map[string]bool)
@@ -152,7 +152,7 @@ func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
 	t.Logf("Looking for pods with selector: %s", labelSelector)
 
 	// Wait for pods
-	pods := waitForPods(t, labelSelector)
+	pods := waitForPods(t, labelSelector, 9)
 
 	// Collect multi-slice validation values
 	numWorkerPods := 0
@@ -236,21 +236,7 @@ func TestWebhookMutation_V6ePodChurnSingleSlice(t *testing.T) {
 	}
 
 	// 3. Delete both worker pods concurrently
-	var wg sync.WaitGroup
-	for _, pod := range targetPods {
-		wg.Add(1)
-		go func(podName string) {
-			defer wg.Done()
-			err := clientset.CoreV1().Pods("default").Delete(t.Context(), podName, metav1.DeleteOptions{})
-			if err != nil {
-				t.Errorf("Failed to delete pod %s: %v", podName, err)
-			}
-		}(pod.Name)
-	}
-	wg.Wait()
-	if t.Failed() {
-		t.FailNow()
-	}
+	deletePodsConcurrently(t, targetPods)
 	t.Log("Target pods deleted concurrently. Waiting for KubeRay operator to re-create both...")
 
 	// 4. Poll and wait for the two brand-new worker pods to be created and mutated
@@ -344,21 +330,7 @@ func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
 	}
 
 	// 3. Delete all four worker pods concurrently
-	var wg sync.WaitGroup
-	for _, pod := range targetPods {
-		wg.Add(1)
-		go func(podName string) {
-			defer wg.Done()
-			err := clientset.CoreV1().Pods("default").Delete(t.Context(), podName, metav1.DeleteOptions{})
-			if err != nil {
-				t.Errorf("Failed to delete pod %s: %v", podName, err)
-			}
-		}(pod.Name)
-	}
-	wg.Wait()
-	if t.Failed() {
-		t.FailNow()
-	}
+	deletePodsConcurrently(t, targetPods)
 	t.Log("Target pods deleted concurrently. Waiting for KubeRay operator to re-create all four...")
 
 	// 4. Poll and wait for all four new worker pods to be created and mutated
@@ -423,7 +395,7 @@ func loadManifest(t *testing.T, relativePath string) *rayv1.RayCluster {
 	return &rayCluster
 }
 
-func waitForPods(t *testing.T, labelSelector string) *corev1.PodList {
+func waitForPods(t *testing.T, labelSelector string, expectedCount int) *corev1.PodList {
 	t.Helper()
 	var pods *corev1.PodList
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -435,13 +407,13 @@ func waitForPods(t *testing.T, labelSelector string) *corev1.PodList {
 		if err != nil {
 			return false, err
 		}
-		if len(pods.Items) > 0 {
+		if len(pods.Items) >= expectedCount {
 			return true, nil
 		}
 		return false, nil
 	})
 	if err != nil {
-		t.Fatalf("Error waiting for pods with selector %s: %v", labelSelector, err)
+		t.Fatalf("Error waiting for %d pods with selector %s: %v (found %d pods)", expectedCount, labelSelector, err, len(pods.Items))
 	}
 	return pods
 }
@@ -462,4 +434,23 @@ func envVarValue(envVars []corev1.EnvVar, name string) string {
 		}
 	}
 	return ""
+}
+
+func deletePodsConcurrently(t *testing.T, pods []corev1.Pod) {
+	t.Helper()
+	var wg sync.WaitGroup
+	for _, pod := range pods {
+		wg.Add(1)
+		go func(podName string) {
+			defer wg.Done()
+			err := clientset.CoreV1().Pods("default").Delete(t.Context(), podName, metav1.DeleteOptions{})
+			if err != nil {
+				t.Errorf("Failed to delete pod %s: %v", podName, err)
+			}
+		}(pod.Name)
+	}
+	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
+	}
 }
