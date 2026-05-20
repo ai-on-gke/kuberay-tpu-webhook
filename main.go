@@ -61,9 +61,9 @@ type slice struct {
 // TPUWebhookServer is a KubeRay TPU webhook server instance.
 type TPUWebhookServer struct {
 	// podLister is used to query Pods from an informer cache.
-	podLister   listersv1.PodLister
-	cacheMutex  sync.Mutex
-	podMutateMu *podSyncLocker
+	podLister  listersv1.PodLister
+	cacheMutex sync.Mutex
+	cacheCond  *podSyncCond
 }
 
 // patch is a JSON patch describing mutate operation(s) for an incoming object.
@@ -96,8 +96,8 @@ var (
 
 func NewTPUWebhookServer(podLister listersv1.PodLister) *TPUWebhookServer {
 	return &TPUWebhookServer{
-		podLister:   podLister,
-		podMutateMu: newPodSyncLocker(),
+		podLister: podLister,
+		cacheCond: newPodSyncCond(),
 	}
 }
 
@@ -696,21 +696,6 @@ func extractPod(admissionReview *admissionv1.AdmissionReview) (*corev1.Pod, erro
 	return &pod, nil
 }
 
-// waitTimeout helper function to sync.WaitGroup Wait() or timeout
-func waitTimeout(wait *sync.WaitGroup, timeout time.Duration) bool {
-	waitChan := make(chan struct{})
-	go func() {
-		defer close(waitChan)
-		wait.Wait()
-	}()
-	select {
-	case <-waitChan:
-		return true // Wait() returned
-	case <-time.After(timeout):
-		return false // Request timed out
-	}
-}
-
 // addEnvVarPatch is a helper to create a JSON patch to add an environment variable to a container.
 // It returns the updated patch slice and a boolean indicating that the env array now exists.
 func addEnvVarPatch(patches []patch, envVar corev1.EnvVar, path string, envArrayExists bool) ([]patch, bool) {
@@ -810,10 +795,8 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		}
 	} else {
 		// Fallback for older KubeRay versions that do not set K8s index labels.
-		// CRITICAL SECTION: Calculating the replica index, pod slice, and
-		// worker ID must happen one at a time with an up-to-date cache.
 		// Wait for PodInformer cache to update from previous requests.
-		timedout := t.podMutateMu.Lock(2 * time.Second)
+		timedout := t.cacheCond.Wait(2 * time.Second)
 		if timedout {
 			klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
 		}
@@ -821,7 +804,6 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		// query k8s client to populate sliceToTPUHosts
 		sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
 		if err != nil {
-			t.podMutateMu.Unlock()
 			return nil, err
 		}
 
@@ -829,13 +811,11 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
 		tpuWorkerID, err = getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
 		if err != nil {
-			t.podMutateMu.Unlock()
 			return nil, err
 		}
 
-		// Update state for next request and release lock.
-		t.podMutateMu.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
-		t.podMutateMu.Unlock()
+		// Update state for next request.
+		t.cacheCond.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
 
 		// Manually inject the replicaIndex label
 		injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
@@ -1108,38 +1088,39 @@ func (t *TPUWebhookServer) addPod(obj interface{}) {
 		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
 
 		// Inform the cache control mechanism of the pod id.
-		t.podMutateMu.Receive(uniquePodID)
+		t.cacheCond.Signal(uniquePodID)
 	}
 }
 
-// podSyncLocker provides a lock that allows the mutating webhook to guarantee
-// only one pod is mutated at a time and the cache is valid during requests.
-type podSyncLocker struct {
+// podSyncCond provides a synchronization primitive that allows the mutating
+// webhook to unblock one in-flight request at a time when the informer cache is
+// ready.
+type podSyncCond struct {
 	m            sync.Mutex
 	wakeChan     chan struct{}
 	synced       bool
 	lastAdmitted string
 }
 
-func newPodSyncLocker() *podSyncLocker {
-	c := &podSyncLocker{
+func newPodSyncCond() *podSyncCond {
+	c := &podSyncCond{
 		wakeChan: make(chan struct{}),
 		synced:   true,
 	}
 	return c
 }
 
-// Lock blocks until both all callers release the lock and the cache is
+// Wait blocks until the cache is up-to-date or the timeout is reached.
 // up-to-date.
-func (c *podSyncLocker) Lock(timeout time.Duration) (timedout bool) {
-	// The lock must be held
-	// 1. While reading or writing c.synced, and
-	// 2. When the function exits.
-	// The lock does not need to be held while waiting for the cache sync or the
-	// timout.
+func (c *podSyncCond) Wait(timeout time.Duration) (timedout bool) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+
+	// The lock must be held while reading or writing c.synced, but cannot be
+	// held while blocking on the channel or timer.
 	c.m.Lock()
+	defer c.m.Unlock()
+
 	for !c.synced { // Lock is held while reading state.
 		c.m.Unlock() // Release lock while waiting to be unblocked.
 		select {
@@ -1160,20 +1141,17 @@ func (c *podSyncLocker) Lock(timeout time.Duration) (timedout bool) {
 }
 
 // Admit invalidates the cache and blocks Lock until the admitted pod has synced
-// to the cache. The lock must be held.
-func (c *podSyncLocker) Admit(pod string) {
+// to the cache.
+func (c *podSyncCond) Admit(pod string) {
+	c.m.Lock()
+	defer c.m.Unlock()
 	c.synced = false
 	c.lastAdmitted = pod
 }
 
-// Unlock releases the lock.
-func (c *podSyncLocker) Unlock() {
-	c.m.Unlock()
-}
-
-// Receive marks a pod as received in the cache. The lock does not need to be
+// Signal marks a pod as received in the cache. The lock does not need to be
 // held.
-func (c *podSyncLocker) Receive(pod string) {
+func (c *podSyncCond) Signal(pod string) {
 	c.m.Lock()
 	defer c.m.Unlock()
 	// If the pod received by the informer matches the one we last admitted --

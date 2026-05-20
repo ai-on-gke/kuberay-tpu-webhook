@@ -1439,7 +1439,7 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 			// set up TPUWebhookServer
 			testPodLister := setupInformer(tc.testPod)
 			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
-			tpuWebhookServer.podMutateMu.lastAdmitted = tc.lastAdmitted
+			tpuWebhookServer.cacheCond.lastAdmitted = tc.lastAdmitted
 
 			//isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(tc.testPod)
 			//if err != nil {
