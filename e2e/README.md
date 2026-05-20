@@ -6,7 +6,7 @@ This directory contains end-to-end (E2E) qualification and mutation tests to val
 
 ## Prerequisites
 
-1.  **Tools**: Install `gcloud`, `kubectl`, and Go `1.22+`.
+1.  **Tools**: Install `gcloud`, `kubectl`, and Go `1.25+`.
 2.  **GCP Project & Quota**: A GCP project with sufficient TPU quota for **v6e** in `us-central2-b`.
 3.  **Permissions**: IAM permissions to create clusters, networks, subnetworks, firewalls, and node pools.
 
@@ -80,23 +80,13 @@ go test -v -run TestWebhookMutation_V6ePodChurnMultiSlice
 go test -v -run TestRayClusterValidation
 ```
 
----
+### 3. Clean Up
+After tests complete, clean up the deployed mutation test fixtures:
+```bash
+kubectl delete -f e2e/manifests/v6e/v6e-8-single-host.yaml --ignore-not-found=true || true
+kubectl delete -f e2e/manifests/v6e/v6e-16-multi-host.yaml --ignore-not-found=true || true
+kubectl delete -f e2e/manifests/v6e/v6e-16-multi-slice.yaml --ignore-not-found=true || true
+```
 
-## What the Tests Verify
 
-The Go test suite encompasses both **Mutating Webhook** and **Validating Webhook** verification cases:
-
-### 1. Mutation Tests (`tpu_pod_mutation_test.go`)
-Queries the Kubernetes API server for generated worker pods and asserts that the mutating webhook correctly injected:
-*   **Environment Variables**: `TPU_WORKER_ID` (unique index 0 to N-1), `TPU_NAME` (shared TPU slice name), `TPU_DEVICE_PLUGIN_HOST_IP`, and `TPU_DEVICE_PLUGIN_ADDR`.
-*   **Hostnames & Pod Identity**: Pod subdomains and custom hostnames for multi-host configuration.
-*   **Labels & Annotations**: Propagation of `replicaIndex` and native `ray.io/` indexing labels.
-*   **Topology & Affinities**: Pod co-location constraints and affinities for scheduling worker groups to node pools.
-*   **Multi-Slice Topologies**: Verifies multi-slice Megascale variable injection (`MEGASCALE_SLICE_ID`, `MEGASCALE_COORDINATOR_ADDRESS`, `MEGASCALE_PORT`) when `MEGASCALE_NUM_SLICES` is defined in the worker group specification.
-*   **Pod Churn**: Supports both single-slice (`TestWebhookMutation_V6ePodChurnSingleSlice`) and multi-slice (`TestWebhookMutation_V6ePodChurnMultiSlice`) configurations. By concurrently deleting multiple worker pods, the tests verify that the mutating webhook fills sequence index gaps by restoring exact original `TPU_WORKER_ID` and `MEGASCALE_SLICE_ID` allocations, validating GKE TPU slice orchestration continuity.
-
-### 2. Validation Tests (`tpu_raycluster_validation_test.go`)
-Using a dynamic API client, attempts to submit various invalid RayCluster configurations to verify the admission controller's rules. It asserts rejection and checks for specific error status payloads:
-*   **`TestRayClusterValidation_InvalidTopology`**: Asserts rejection when the physical layout does not match expected TPU host ratios. Status payload: `"Number of workers in worker group not equal to specified topology"`.
-*   **`TestRayClusterValidation_MissingTopologyKey`**: Asserts rejection when the TPU worker group is missing the topology selector, triggering an internal parsing crash. Status payload: `"Failed to validate RayCluster"`.
 

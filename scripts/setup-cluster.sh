@@ -38,7 +38,7 @@ if ! gcloud compute networks subnets describe "$SUBNET_NAME" --region "$REGION" 
         networks subnets create "${SUBNET_NAME}" \
         --network="${NETWORK_NAME}" \
         --region="${REGION}" \
-        --range=192.168.100.0/24
+        --range="${SUBNET_RANGE:-192.168.100.0/24}"
 else
     echo "Subnet $SUBNET_NAME already exists."
 fi

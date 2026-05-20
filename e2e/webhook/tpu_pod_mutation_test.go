@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,12 +15,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-var kubeconfig *string
+var (
+	kubeconfig    *string
+	clientset     kubernetes.Interface
+	dynamicClient dynamic.Interface
+	initErr       error
+)
 
 func init() {
 	if home := os.Getenv("HOME"); home != "" {
@@ -30,57 +39,30 @@ func init() {
 
 func TestMain(m *testing.M) {
 	flag.Parse()
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err == nil {
+		clientset, err = kubernetes.NewForConfig(config)
+		if err == nil {
+			dynamicClient, err = dynamic.NewForConfig(config)
+		}
+	}
+	initErr = err
 	os.Exit(m.Run())
 }
 
 func TestWebhookMutation_V6eSingleHost(t *testing.T) {
-	// Setup kube client
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("Error creating clientset: %v", err)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
 	// Load manifest
-	manifestPath := filepath.Join("..", "manifests", "v6e", "v6e-8-single-host.yaml")
-	manifestFile, err := os.Open(manifestPath)
-	if err != nil {
-		t.Fatalf("Error opening manifest file: %v", err)
-	}
-	defer manifestFile.Close()
-
-	var rayCluster rayv1.RayCluster
-	decoder := yaml.NewYAMLOrJSONDecoder(manifestFile, 1024)
-	if err := decoder.Decode(&rayCluster); err != nil {
-		t.Fatalf("Error decoding manifest: %v", err)
-	}
-
-	// TODO: Use dynamic client to create cluster instead of assuming it exists.
+	rayCluster := loadManifest(t, "../manifests/v6e/v6e-8-single-host.yaml")
 
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
-	fmt.Printf("Looking for pods with selector: %s\n", labelSelector)
+	t.Logf("Looking for pods with selector: %s", labelSelector)
 
 	// Wait for pods
-	var pods *corev1.PodList
-	for i := 0; i < 5; i++ {
-		pods, err = clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			t.Fatalf("Error listing pods: %v", err)
-		}
-		if len(pods.Items) > 0 {
-			break
-		}
-		fmt.Println("Waiting for pods to be created...")
-		time.Sleep(5 * time.Second)
-	}
-
-	if len(pods.Items) == 0 {
-		t.Skip("No pods found for cluster, skipping verification. Ensure a cluster is running and manifests are applied.")
-	}
+	pods := waitForPods(t, labelSelector)
 
 	// Verify mutations
 	for _, pod := range pods.Items {
@@ -97,51 +79,18 @@ func TestWebhookMutation_V6eSingleHost(t *testing.T) {
 }
 
 func TestWebhookMutation_V6eMultiHost(t *testing.T) {
-	// Setup kube client
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("Error creating clientset: %v", err)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
 	// Load manifest
-	manifestPath := filepath.Join("..", "manifests", "v6e", "v6e-16-multi-host.yaml")
-	manifestFile, err := os.Open(manifestPath)
-	if err != nil {
-		t.Fatalf("Error opening manifest file: %v", err)
-	}
-	defer manifestFile.Close()
-
-	var rayCluster rayv1.RayCluster
-	decoder := yaml.NewYAMLOrJSONDecoder(manifestFile, 1024)
-	if err := decoder.Decode(&rayCluster); err != nil {
-		t.Fatalf("Error decoding manifest: %v", err)
-	}
+	rayCluster := loadManifest(t, "../manifests/v6e/v6e-16-multi-host.yaml")
 
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
-	fmt.Printf("Looking for pods with selector: %s\n", labelSelector)
+	t.Logf("Looking for pods with selector: %s", labelSelector)
 
 	// Wait for pods
-	var pods *corev1.PodList
-	for i := 0; i < 5; i++ {
-		pods, err = clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			t.Fatalf("Error listing pods: %v", err)
-		}
-		if len(pods.Items) > 0 {
-			break
-		}
-		fmt.Println("Waiting for pods to be created...")
-		time.Sleep(5 * time.Second)
-	}
-
-	if len(pods.Items) == 0 {
-		t.Skip("No pods found for cluster, skipping verification. Ensure a cluster is running and manifests are applied.")
-	}
+	pods := waitForPods(t, labelSelector)
 
 	// Collect values
 	workerIds := make(map[string]bool)
@@ -155,8 +104,8 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 			envVars := pod.Spec.Containers[0].Env
 
 			// Extract values
-			workerId := getEnvVarValue(envVars, "TPU_WORKER_ID")
-			tpuName := getEnvVarValue(envVars, "TPU_NAME")
+			workerId := envVarValue(envVars, "TPU_WORKER_ID")
+			tpuName := envVarValue(envVars, "TPU_NAME")
 
 			assert.NotEmpty(t, workerId, "TPU_WORKER_ID is empty")
 			assert.NotEmpty(t, tpuName, "TPU_NAME is empty")
@@ -192,51 +141,18 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 }
 
 func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
-	// Setup kube client
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("Error creating clientset: %v", err)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
 	// Load manifest
-	manifestPath := filepath.Join("..", "manifests", "v6e", "v6e-16-multi-slice.yaml")
-	manifestFile, err := os.Open(manifestPath)
-	if err != nil {
-		t.Fatalf("Error opening manifest file: %v", err)
-	}
-	defer manifestFile.Close()
-
-	var rayCluster rayv1.RayCluster
-	decoder := yaml.NewYAMLOrJSONDecoder(manifestFile, 1024)
-	if err := decoder.Decode(&rayCluster); err != nil {
-		t.Fatalf("Error decoding manifest: %v", err)
-	}
+	rayCluster := loadManifest(t, "../manifests/v6e/v6e-16-multi-slice.yaml")
 
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
-	fmt.Printf("Looking for pods with selector: %s\n", labelSelector)
+	t.Logf("Looking for pods with selector: %s", labelSelector)
 
 	// Wait for pods
-	var pods *corev1.PodList
-	for i := 0; i < 5; i++ {
-		pods, err = clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
-		if err != nil {
-			t.Fatalf("Error listing pods: %v", err)
-		}
-		if len(pods.Items) > 0 {
-			break
-		}
-		fmt.Println("Waiting for pods to be created...")
-		time.Sleep(5 * time.Second)
-	}
-
-	if len(pods.Items) == 0 {
-		t.Skip("No pods found for cluster, skipping verification. Ensure a cluster is running and manifests are applied.")
-	}
+	pods := waitForPods(t, labelSelector)
 
 	// Collect multi-slice validation values
 	numWorkerPods := 0
@@ -253,13 +169,13 @@ func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
 			assert.True(t, hasEnvVar(envVars, "MEGASCALE_COORDINATOR_ADDRESS"), "Missing MEGASCALE_COORDINATOR_ADDRESS")
 			assert.True(t, hasEnvVar(envVars, "MEGASCALE_PORT"), "Missing MEGASCALE_PORT")
 
-			sliceId := getEnvVarValue(envVars, "MEGASCALE_SLICE_ID")
+			sliceId := envVarValue(envVars, "MEGASCALE_SLICE_ID")
 			sliceIds[sliceId]++
 
-			coordAddr := getEnvVarValue(envVars, "MEGASCALE_COORDINATOR_ADDRESS")
+			coordAddr := envVarValue(envVars, "MEGASCALE_COORDINATOR_ADDRESS")
 			coordinatorAddresses[coordAddr] = true
 
-			port := getEnvVarValue(envVars, "MEGASCALE_PORT")
+			port := envVarValue(envVars, "MEGASCALE_PORT")
 			megascalePorts[port] = true
 		}
 	}
@@ -278,22 +194,15 @@ func TestWebhookMutation_V6eMultiSlice(t *testing.T) {
 }
 
 func TestWebhookMutation_V6ePodChurnSingleSlice(t *testing.T) {
-	// Setup kube client
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("Error creating clientset: %v", err)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
 	clusterName := "tpu-v6e-multi-host"
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", clusterName)
 
 	// 1. Get initial pods and track their names
-	initialPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+	initialPods, err := clientset.CoreV1().Pods("default").List(t.Context(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil || len(initialPods.Items) == 0 {
 		t.Skip("Skipping pod churn test: No multi-host pods found in default namespace.")
 	}
@@ -321,27 +230,38 @@ func TestWebhookMutation_V6ePodChurnSingleSlice(t *testing.T) {
 	// Record their original TPU_WORKER_IDs
 	expectedWorkerIDs := make(map[string]bool)
 	for _, pod := range targetPods {
-		wID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		wID := envVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
 		expectedWorkerIDs[wID] = true
 		t.Logf("Targeting worker pod %s (TPU_WORKER_ID=%s) for deletion", pod.Name, wID)
 	}
 
 	// 3. Delete both worker pods concurrently
+	var wg sync.WaitGroup
 	for _, pod := range targetPods {
-		err = clientset.CoreV1().Pods("default").Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
-		if err != nil {
-			t.Fatalf("Failed to delete pod %s: %v", pod.Name, err)
-		}
+		wg.Add(1)
+		go func(podName string) {
+			defer wg.Done()
+			err := clientset.CoreV1().Pods("default").Delete(t.Context(), podName, metav1.DeleteOptions{})
+			if err != nil {
+				t.Errorf("Failed to delete pod %s: %v", podName, err)
+			}
+		}(pod.Name)
+	}
+	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
 	}
 	t.Log("Target pods deleted concurrently. Waiting for KubeRay operator to re-create both...")
 
 	// 4. Poll and wait for the two brand-new worker pods to be created and mutated
 	var recreatedPods []corev1.Pod
-	for i := 0; i < 15; i++ {
-		time.Sleep(5 * time.Second)
-		currentPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+
+	err = wait.PollUntilContextTimeout(ctx, 3*time.Second, 90*time.Second, true, func(ctx context.Context) (bool, error) {
+		currentPods, err := clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 		if err != nil {
-			t.Fatalf("Failed to list pods during churn polling: %v", err)
+			return false, err
 		}
 
 		recreatedPods = nil
@@ -353,40 +273,33 @@ func TestWebhookMutation_V6ePodChurnSingleSlice(t *testing.T) {
 			}
 		}
 		if len(recreatedPods) == 2 {
-			break
+			return true, nil
 		}
 		t.Logf("Waiting for recreated pods to be mutated... (found %d/2)", len(recreatedPods))
-	}
-
-	if len(recreatedPods) != 2 {
-		t.Fatalf("Timed out waiting for the recreated worker pods. Found %d/2", len(recreatedPods))
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("Timed out waiting for the recreated worker pods: %v (found %d/2)", err, len(recreatedPods))
 	}
 
 	// 5. Assert that the new pods got the same TPU_WORKER_IDs as before the churn
 	for _, pod := range recreatedPods {
-		assignedID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		assignedID := envVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
 		t.Logf("Re-created pod name: %s, Assigned TPU_WORKER_ID: %s", pod.Name, assignedID)
 		assert.True(t, expectedWorkerIDs[assignedID], "Re-created pod TPU_WORKER_ID %s was not in the original expected IDs", assignedID)
 	}
 }
 
 func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
-	// Setup kube client
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("Error creating clientset: %v", err)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
 	}
 
 	clusterName := "tpu-v6e-multi-slice"
 	labelSelector := fmt.Sprintf("ray.io/cluster=%s", clusterName)
 
 	// 1. Get initial pods and track their names
-	initialPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+	initialPods, err := clientset.CoreV1().Pods("default").List(t.Context(), metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil || len(initialPods.Items) == 0 {
 		t.Skip("Skipping pod churn test: No multi-slice pods found in default namespace.")
 	}
@@ -402,7 +315,7 @@ func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
 
 	for _, pod := range initialPods.Items {
 		if pod.Labels["ray.io/node-type"] == "worker" {
-			sliceID := getEnvVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
+			sliceID := envVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
 			if sliceID == "0" && len(slice0Targets) < 2 {
 				slice0Targets = append(slice0Targets, pod)
 			} else if sliceID == "1" && len(slice1Targets) < 2 {
@@ -424,28 +337,39 @@ func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
 	expectedPodMappings["1"] = make(map[string]bool)
 
 	for _, pod := range targetPods {
-		sliceID := getEnvVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
-		wID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		sliceID := envVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
+		wID := envVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
 		expectedPodMappings[sliceID][wID] = true
 		t.Logf("Targeting multi-slice worker pod %s (Slice=%s, TPU_WORKER_ID=%s) for deletion", pod.Name, sliceID, wID)
 	}
 
 	// 3. Delete all four worker pods concurrently
+	var wg sync.WaitGroup
 	for _, pod := range targetPods {
-		err = clientset.CoreV1().Pods("default").Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
-		if err != nil {
-			t.Fatalf("Failed to delete pod %s: %v", pod.Name, err)
-		}
+		wg.Add(1)
+		go func(podName string) {
+			defer wg.Done()
+			err := clientset.CoreV1().Pods("default").Delete(t.Context(), podName, metav1.DeleteOptions{})
+			if err != nil {
+				t.Errorf("Failed to delete pod %s: %v", podName, err)
+			}
+		}(pod.Name)
+	}
+	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
 	}
 	t.Log("Target pods deleted concurrently. Waiting for KubeRay operator to re-create all four...")
 
 	// 4. Poll and wait for all four new worker pods to be created and mutated
 	var recreatedPods []corev1.Pod
-	for i := 0; i < 15; i++ {
-		time.Sleep(5 * time.Second)
-		currentPods, err := clientset.CoreV1().Pods("default").List(context.TODO(), metav1.ListOptions{LabelSelector: labelSelector})
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+
+	err = wait.PollUntilContextTimeout(ctx, 3*time.Second, 90*time.Second, true, func(ctx context.Context) (bool, error) {
+		currentPods, err := clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 		if err != nil {
-			t.Fatalf("Failed to list pods during churn polling: %v", err)
+			return false, err
 		}
 
 		recreatedPods = nil
@@ -457,19 +381,19 @@ func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
 			}
 		}
 		if len(recreatedPods) == 4 {
-			break
+			return true, nil
 		}
 		t.Logf("Waiting for recreated multi-slice pods... (found %d/4)", len(recreatedPods))
-	}
-
-	if len(recreatedPods) != 4 {
-		t.Fatalf("Timed out waiting for the recreated worker pods in multi-slice cluster. Found %d/4", len(recreatedPods))
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("Timed out waiting for the recreated worker pods in multi-slice cluster: %v (found %d/4)", err, len(recreatedPods))
 	}
 
 	// 5. Assert that each recreated pod got its original TPU_WORKER_ID under the correct MEGASCALE_SLICE_ID
 	for _, pod := range recreatedPods {
-		sliceID := getEnvVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
-		assignedID := getEnvVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
+		sliceID := envVarValue(pod.Spec.Containers[0].Env, "MEGASCALE_SLICE_ID")
+		assignedID := envVarValue(pod.Spec.Containers[0].Env, "TPU_WORKER_ID")
 		t.Logf("Re-created multi-slice pod name: %s, Assigned Slice: %s, TPU_WORKER_ID: %s", pod.Name, sliceID, assignedID)
 
 		originalExpectedIDs, exists := expectedPodMappings[sliceID]
@@ -478,7 +402,49 @@ func TestWebhookMutation_V6ePodChurnMultiSlice(t *testing.T) {
 	}
 }
 
-// Helper functions
+func loadManifest(t *testing.T, relativePath string) *rayv1.RayCluster {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("Failed to get current file path via runtime.Caller")
+	}
+	manifestPath := filepath.Clean(filepath.Join(filepath.Dir(filename), relativePath))
+	manifestFile, err := os.Open(manifestPath)
+	if err != nil {
+		t.Fatalf("Error opening manifest file at %s: %v", manifestPath, err)
+	}
+	defer manifestFile.Close()
+
+	var rayCluster rayv1.RayCluster
+	decoder := yaml.NewYAMLOrJSONDecoder(manifestFile, 1024)
+	if err := decoder.Decode(&rayCluster); err != nil {
+		t.Fatalf("Error decoding manifest at %s: %v", manifestPath, err)
+	}
+	return &rayCluster
+}
+
+func waitForPods(t *testing.T, labelSelector string) *corev1.PodList {
+	t.Helper()
+	var pods *corev1.PodList
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+		var err error
+		pods, err = clientset.CoreV1().Pods("default").List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+		if len(pods.Items) > 0 {
+			return true, nil
+		}
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("Error waiting for pods with selector %s: %v", labelSelector, err)
+	}
+	return pods
+}
 
 func hasEnvVar(envVars []corev1.EnvVar, name string) bool {
 	for _, env := range envVars {
@@ -489,7 +455,7 @@ func hasEnvVar(envVars []corev1.EnvVar, name string) bool {
 	return false
 }
 
-func getEnvVarValue(envVars []corev1.EnvVar, name string) string {
+func envVarValue(envVars []corev1.EnvVar, name string) string {
 	for _, env := range envVars {
 		if env.Name == name {
 			return env.Value

@@ -1,9 +1,6 @@
 package webhook
 
 import (
-	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
@@ -13,23 +10,26 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/yaml"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 func TestRayClusterValidation_InvalidTopology(t *testing.T) {
-	dynamicClient := getDynamicClient(t)
-	baseCluster := loadBaseRayCluster(t)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
+	}
+
+	baseCluster := loadManifest(t, "../manifests/invalid/invalid-topology.yaml")
 
 	t.Log("Running validating webhook case: Strict Topology Mismatch Rejection")
 	// Base invalid-topology manifest has replica workerGroup with numOfHosts: 2 but requests 2x4 topology (expected 1 host)
-	assertRayClusterRejected(t, dynamicClient, baseCluster, "Number of workers in worker group not equal to specified topology")
+	assertRayClusterRejected(t, baseCluster, "Number of workers in worker group not equal to specified topology")
 }
 
 func TestRayClusterValidation_MissingTopologyKey(t *testing.T) {
-	dynamicClient := getDynamicClient(t)
-	cluster := loadBaseRayCluster(t)
+	if initErr != nil {
+		t.Skipf("Skipping test as cluster clients could not be initialized: %v", initErr)
+	}
+
+	cluster := loadManifest(t, "../manifests/invalid/invalid-topology.yaml")
 	cluster.Name = "tpu-v6e-missing-topology"
 
 	t.Log("Running validating webhook case: Missing cloud.google.com/gke-tpu-topology Selector Rejection")
@@ -39,43 +39,11 @@ func TestRayClusterValidation_MissingTopologyKey(t *testing.T) {
 	// Since missing node selectors trigger an internal parsing error in checkWorkersMatchTopology,
 	// the webhook controller terminates with an admission crash.
 	// We assert that the API server returns a clean calling webhook crash payload.
-	assertRayClusterRejected(t, dynamicClient, cluster, "Failed to validate RayCluster")
+	assertRayClusterRejected(t, cluster, "Failed to validate RayCluster")
 }
 
-// Helper functions
-
-func getDynamicClient(t *testing.T) dynamic.Interface {
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
-	if err != nil {
-		t.Skipf("Skipping test as kubeconfig is not available: %v", err)
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("Error creating dynamic client: %v", err)
-	}
-
-	return dynamicClient
-}
-
-func loadBaseRayCluster(t *testing.T) *rayv1.RayCluster {
-	manifestPath := filepath.Join("..", "manifests", "invalid", "invalid-topology.yaml")
-	manifestFile, err := os.Open(manifestPath)
-	if err != nil {
-		t.Fatalf("Error opening manifest file: %v", err)
-	}
-	defer manifestFile.Close()
-
-	var rayCluster rayv1.RayCluster
-	decoder := yaml.NewYAMLOrJSONDecoder(manifestFile, 1024)
-	if err := decoder.Decode(&rayCluster); err != nil {
-		t.Fatalf("Error decoding manifest: %v", err)
-	}
-
-	return &rayCluster
-}
-
-func assertRayClusterRejected(t *testing.T, dynamicClient dynamic.Interface, cluster *rayv1.RayCluster, expectedErrorMessage string) {
+func assertRayClusterRejected(t *testing.T, cluster *rayv1.RayCluster, expectedErrorMessage string) {
+	t.Helper()
 	unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
 	if err != nil {
 		t.Fatalf("Error converting RayCluster to unstructured: %v", err)
@@ -88,7 +56,7 @@ func assertRayClusterRejected(t *testing.T, dynamicClient dynamic.Interface, clu
 	}
 
 	_, err = dynamicClient.Resource(gvr).Namespace("default").Create(
-		context.TODO(),
+		t.Context(),
 		&unstructured.Unstructured{Object: unstructuredObj},
 		metav1.CreateOptions{},
 	)
