@@ -1465,7 +1465,9 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 						}
 					}
 				}
-				tpuWebhookServer.cacheCond.lastAdmitted = tc.lastAdmitted
+				if len(tc.lastAdmitted) > 0 {
+					tpuWebhookServer.cacheCond.lastAdmitted = tc.lastAdmitted
+				}
 			}
 
 			isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
