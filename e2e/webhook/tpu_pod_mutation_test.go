@@ -2,7 +2,6 @@
 
 package webhook
 
-
 import (
 	"context"
 	"flag"
@@ -125,6 +124,31 @@ func TestWebhookMutation_V6eMultiHost(t *testing.T) {
 
 	assert.Equal(t, 1, len(tpuNames), "All pods in the same slice should share the same TPU_NAME")
 	assert.Equal(t, 1, len(replicaIndices), "All pods in the same slice should share the same replicaIndex")
+}
+
+func TestWebhookMutation_TorchTpuEnvs(t *testing.T) {
+	rayCluster := loadManifest(t, "../manifests/v6e/v6e-8-single-host.yaml")
+
+	labelSelector := fmt.Sprintf("ray.io/cluster=%s", rayCluster.Name)
+	t.Logf("Looking for pods with selector: %s", labelSelector)
+
+	pods := waitForPods(t, labelSelector, 2)
+
+	for _, pod := range pods.Items {
+		if pod.Labels["ray.io/node-type"] == "worker" {
+			envVars := pod.Spec.Containers[0].Env
+			assert.True(t, hasEnvVar(envVars, "TORCH_TPU_TOPOLOGY"), "Missing TORCH_TPU_TOPOLOGY")
+			assert.True(t, hasEnvVar(envVars, "TORCH_TPU_SLICEBUILDER_ADDRESSES"), "Missing TORCH_TPU_SLICEBUILDER_ADDRESSES")
+
+			topology := envVarValue(envVars, "TORCH_TPU_TOPOLOGY")
+			assert.Equal(t, "2,4,1", topology, "Unexpected TORCH_TPU_TOPOLOGY")
+
+			addresses := envVarValue(envVars, "TORCH_TPU_SLICEBUILDER_ADDRESSES")
+			expectedAddresses := "localhost:8471,localhost:8472,localhost:8473,localhost:8474,localhost:8475,localhost:8476,localhost:8477,localhost:8478"
+			assert.Equal(t, expectedAddresses, addresses, "Unexpected TORCH_TPU_SLICEBUILDER_ADDRESSES")
+			break
+		}
+	}
 }
 
 func TestWebhookMutation_V6eMultiSlice(t *testing.T) {

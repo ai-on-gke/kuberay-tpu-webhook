@@ -226,20 +226,45 @@ func getNumTPUHostsFromTopology(clusterName string, groupName string, namespace 
 	if topology == "" {
 		return 0, errors.New("TPU topology not specified")
 	}
-	topologyVals := strings.Split(topology, "x")
-	chips := 1
-	for i := 0; i < len(topologyVals); i++ {
-		dim, err := strconv.Atoi(topologyVals[i])
-		if err != nil {
-			klog.ErrorS(err, "getNumTPUHostsFromTopology", "RayCluster", namespace+"/"+clusterName, "Worker Group", groupName, "gke-tpu-topology", topology)
-			return 0, err
-		}
-		chips *= dim
+	topologyDims, err := getDimsFromTopology(topology)
+	if err != nil {
+		klog.ErrorS(err, "getNumTPUHostsFromTopology", "RayCluster", namespace+"/"+clusterName, "Worker Group", groupName, "gke-tpu-topology", topology)
+		return 0, err
 	}
+	chips := calculateTotalChips(topologyDims)
 	// calculate the # of VMs using # of chips per host
 	hosts := max(int32(chips)/int32(chipsPerHost), 1)
 	klog.V(1).InfoS("getNumTPUHostsFromTopology", "RayCluster", namespace+"/"+clusterName, "Worker Group", groupName, "topology", topology, "chips", chips, "hosts", hosts)
 	return hosts, nil
+}
+
+// getDimsFromTopology returns the dimensions of the TPU topology as a slice of int64.
+// It normalizes 2D topologies to 3D by adding a 3rd dimension of 1.
+func getDimsFromTopology(topology string) ([]int, error) {
+	var topologyDims []int
+	topologyDimStrs := strings.Split(topology, "x")
+	for _, s := range topologyDimStrs {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return nil, err
+		}
+		topologyDims = append(topologyDims, n)
+	}
+
+	// Add 3rd dimension of 1 to 2D topologies (e.g. 2x2 -> 2x2x1).
+	if len(topologyDims) == 2 {
+		topologyDims = append(topologyDims, 1)
+	}
+	return topologyDims, nil
+}
+
+// calculateTotalChips returns the total number of chips in the topology.
+func calculateTotalChips(topologyDims []int) int {
+	totalChips := 1
+	for _, chips := range topologyDims {
+		totalChips *= int(chips)
+	}
+	return totalChips
 }
 
 // extractRayCluster returns RayCluster unmarshalled from an admission request
@@ -311,6 +336,77 @@ func injectHostnames(clusterName string, hostNames string, envPath string, conta
 	updatedPatches, envArrayExists = addEnvVarPatch(*patches, tpuWorkerHostNames, envPath, envArrayExists)
 	*patches = updatedPatches
 
+	return envArrayExists
+}
+
+// injectTorchTpuEnvsIfNeeded injects Torch TPU environment variables into a Pod if not already set.
+func injectTorchTpuEnvsIfNeeded(hostnames string, pod *corev1.Pod, container corev1.Container, envPath string, patches *[]patch, envArrayExists bool, tpuSupportTensorNode bool) (bool, error) {
+	if _, exists := getEnvironmentVariable("TORCH_TPU_TOPOLOGY", container); exists {
+		return envArrayExists, nil
+	}
+
+	topology := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-topology"]
+	topologyDims, err := getDimsFromTopology(topology)
+	if err != nil {
+		return envArrayExists, err
+	}
+
+	var topologyStrParts []string
+	for _, dim := range topologyDims {
+		topologyStrParts = append(topologyStrParts, strconv.Itoa(dim))
+	}
+
+	// Build TORCH_TPU_TOPOLOGY
+	topologyStr := strings.Join(topologyStrParts, ",")
+	if tpuSupportTensorNode {
+		// TensorNode TPUs have multi-chiplet (2 per physical chip) architecture
+		topologyStr += ",2"
+	}
+
+	klog.V(1).InfoS("injectTorchTpuEnvs", "Injecting TORCH_TPU_TOPOLOGY", topologyStr)
+	envArrayExists = injectTorchTPUTopology(topologyStr, envPath, patches, envArrayExists)
+
+	// Build TORCH_TPU_SLICEBUILDER_ADDRESSES
+	hostnamesList := strings.Split(hostnames, ",")
+	chipsPerHost := calculateTotalChips(topologyDims) / len(hostnamesList)
+
+	if tpuSupportTensorNode {
+		// TensorNode TPUs have multi-chiplet (2 per physical chip) architecture
+		chipsPerHost *= 2
+	}
+
+	var addresses []string
+	for _, host := range hostnamesList {
+		for i := 0; i < chipsPerHost; i++ {
+			addresses = append(addresses, fmt.Sprintf("%s:%d", host, tpuProcessPortBase+i))
+		}
+	}
+
+	addressesStr := strings.Join(addresses, ",")
+	klog.V(1).InfoS("injectTorchTpuEnvs", "Injecting TORCH_TPU_SLICEBUILDER_ADDRESSES", addressesStr)
+	envArrayExists = injectTorchTPUSlicebuilderAddresses(addressesStr, envPath, patches, envArrayExists)
+
+	return envArrayExists, nil
+}
+
+// injectTorchTPUTopology injects TORCH_TPU_TOPOLOGY into a Pod.
+func injectTorchTPUTopology(topologyStr string, envPath string, patches *[]patch, envArrayExists bool) bool {
+	torchTpuTopology := corev1.EnvVar{
+		Name:  "TORCH_TPU_TOPOLOGY",
+		Value: topologyStr,
+	}
+	*patches, envArrayExists = addEnvVarPatch(*patches, torchTpuTopology, envPath, envArrayExists)
+
+	return envArrayExists
+}
+
+// injectTorchTPUSlicebuilderAddresses injects TORCH_TPU_SLICEBUILDER_ADDRESSES into a Pod.
+func injectTorchTPUSlicebuilderAddresses(addresses string, envPath string, patches *[]patch, envArrayExists bool) bool {
+	torchTpuSlicebuilderAddresses := corev1.EnvVar{
+		Name:  "TORCH_TPU_SLICEBUILDER_ADDRESSES",
+		Value: addresses,
+	}
+	*patches, envArrayExists = addEnvVarPatch(*patches, torchTpuSlicebuilderAddresses, envPath, envArrayExists)
 	return envArrayExists
 }
 
@@ -865,13 +961,14 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 					}, path, isEnvInitialized)
 				}
 			}
-			// Network addressing injection logic.
+
+			hostnames := "localhost"
 			if numOfHosts > 1 {
 				// Legacy: inject TPU_WORKER_HOSTNAMES
-				val, _ := getEnvironmentVariable("TPU_WORKER_HOSTNAMES", container)
-				if val == "" || val == "localhost" {
+				hostnames, _ = getEnvironmentVariable("TPU_WORKER_HOSTNAMES", container)
+				if hostnames == "" || hostnames == "localhost" {
 					// Inject value if unset or set to default value.
-					hostnames, err := genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
+					hostnames, err = genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
 					if err != nil {
 						return nil, err
 					}
@@ -897,6 +994,13 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 					}
 				}
 			}
+
+			// Network addressing injection logic.
+			isEnvInitialized, err = injectTorchTpuEnvsIfNeeded(hostnames, pod, container, path, &patches, isEnvInitialized, isV7x)
+			if err != nil {
+				return nil, err
+			}
+
 			// inject TPU_WORKER_ID
 			valWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 			expectedID := fmt.Sprint(finalWorkerID)

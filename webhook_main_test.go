@@ -919,6 +919,99 @@ func Test_InjectHostnames(t *testing.T) {
 	}
 }
 
+func Test_InjectTorchTpuEnvsIfNeeded(t *testing.T) {
+	tests := map[string]struct {
+		clusterName       string
+		groupName         string
+		topology          string
+		accelerator       string
+		hostnames         string
+		initialEnv        []corev1.EnvVar
+		expectedTopology  string
+		expectedAddresses string
+		expectError       bool
+	}{
+		"injectTorchTpuEnvs for multi-host v4": {
+			clusterName:       "test-cluster",
+			groupName:         "test-group",
+			topology:          "2x2x2",
+			accelerator:       "tpu-v4-podslice",
+			hostnames:         "test-group-0-0.test-cluster-headless,test-group-0-1.test-cluster-headless,test-group-0-2.test-cluster-headless,test-group-0-3.test-cluster-headless,test-group-0-4.test-cluster-headless,test-group-0-5.test-cluster-headless,test-group-0-6.test-cluster-headless,test-group-0-7.test-cluster-headless",
+			expectedTopology:  "2,2,2",
+			expectedAddresses: "test-group-0-0.test-cluster-headless:8471,test-group-0-1.test-cluster-headless:8471,test-group-0-2.test-cluster-headless:8471,test-group-0-3.test-cluster-headless:8471,test-group-0-4.test-cluster-headless:8471,test-group-0-5.test-cluster-headless:8471,test-group-0-6.test-cluster-headless:8471,test-group-0-7.test-cluster-headless:8471",
+		},
+		"injectTorchTpuEnvs for multi-host v7x": {
+			clusterName:       "test-cluster",
+			groupName:         "test-group",
+			topology:          "2x2x2",
+			accelerator:       "tpu7x",
+			hostnames:         "test-group-0-0.test-cluster-headless,test-group-0-1.test-cluster-headless,test-group-0-2.test-cluster-headless,test-group-0-3.test-cluster-headless,test-group-0-4.test-cluster-headless,test-group-0-5.test-cluster-headless,test-group-0-6.test-cluster-headless,test-group-0-7.test-cluster-headless",
+			expectedTopology:  "2,2,2,2",
+			expectedAddresses: "test-group-0-0.test-cluster-headless:8471,test-group-0-0.test-cluster-headless:8472,test-group-0-1.test-cluster-headless:8471,test-group-0-1.test-cluster-headless:8472,test-group-0-2.test-cluster-headless:8471,test-group-0-2.test-cluster-headless:8472,test-group-0-3.test-cluster-headless:8471,test-group-0-3.test-cluster-headless:8472,test-group-0-4.test-cluster-headless:8471,test-group-0-4.test-cluster-headless:8472,test-group-0-5.test-cluster-headless:8471,test-group-0-5.test-cluster-headless:8472,test-group-0-6.test-cluster-headless:8471,test-group-0-6.test-cluster-headless:8472,test-group-0-7.test-cluster-headless:8471,test-group-0-7.test-cluster-headless:8472",
+		},
+		"injectTorchTpuEnvs for single-host": {
+			clusterName:       "test-cluster",
+			groupName:         "test-group",
+			topology:          "2x2x1",
+			accelerator:       "tpu-v4-podslice",
+			hostnames:         "localhost",
+			expectedTopology:  "2,2,1",
+			expectedAddresses: "localhost:8471,localhost:8472,localhost:8473,localhost:8474",
+		},
+		"skip injection if TORCH_TPU_TOPOLOGY already exists": {
+			clusterName:      "test-cluster",
+			groupName:        "test-group",
+			topology:         "2x2x2",
+			accelerator:      "tpu-v4-podslice",
+			hostnames:        "test-group-0-0.test-cluster-headless,test-group-0-1.test-cluster-headless",
+			initialEnv:       []corev1.EnvVar{{Name: "TORCH_TPU_TOPOLOGY", Value: "already-set"}},
+			expectedTopology: "", // No patch expected
+		},
+		"fail on invalid topology": {
+			clusterName: "test-cluster",
+			groupName:   "test-group",
+			topology:    "invalid",
+			accelerator: "tpu-v4-podslice",
+			hostnames:   "test-group-0-0.test-cluster-headless",
+			expectError: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			testPod := getTestTPUWorker(tc.clusterName, tc.groupName, "test-namespace", tc.accelerator, tc.topology, "4")
+			if tc.initialEnv != nil {
+				testPod.Spec.Containers[0].Env = tc.initialEnv
+			}
+			patches := []patch{}
+			
+			_, err := injectTorchTpuEnvsIfNeeded(tc.hostnames, testPod, testPod.Spec.Containers[0], "/spec/containers/0/env", &patches, len(testPod.Spec.Containers[0].Env) > 0, strings.HasPrefix(tc.accelerator, "tpu7x"))
+			
+			if tc.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			
+			if tc.expectedTopology != "" {
+				if assert.GreaterOrEqual(t, len(patches), 2) {
+					// Check TOPOLOGY patch
+					assert.Equal(t, "/spec/containers/0/env", patches[0]["path"])
+					expectedTopoEnv := []corev1.EnvVar{{Name: "TORCH_TPU_TOPOLOGY", Value: tc.expectedTopology}}
+					assert.Equal(t, expectedTopoEnv, patches[0]["value"])
+					
+					// Check SLICEBUILDER_ADDRESSES patch
+					assert.Equal(t, "/spec/containers/0/env/-", patches[1]["path"])
+					expectedAddrEnv := corev1.EnvVar{Name: "TORCH_TPU_SLICEBUILDER_ADDRESSES", Value: tc.expectedAddresses}
+					assert.Equal(t, expectedAddrEnv, patches[1]["value"])
+				}
+			} else {
+				assert.Equal(t, 0, len(patches), "Expected no patches")
+			}
+		})
+	}
+}
+
 func Test_InjectSubdomain(t *testing.T) {
 	tests := map[string]struct {
 		clusterName       string
