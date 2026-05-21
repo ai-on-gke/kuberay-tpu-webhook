@@ -103,9 +103,6 @@ func NewTPUWebhookServer(podLister listersv1.PodLister) *TPUWebhookServer {
 
 // Mutate handles http Request for Pod creation and writes a response
 func (t *TPUWebhookServer) Mutate(w http.ResponseWriter, r *http.Request) {
-	t.cacheMutex.Lock()
-	defer t.cacheMutex.Unlock()
-
 	admissionReview := &admissionv1.AdmissionReview{}
 	if err := json.NewDecoder(r.Body).Decode(admissionReview); err != nil {
 		http.Error(w, "Error decoding request body", http.StatusBadRequest)
@@ -794,31 +791,41 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			return nil, fmt.Errorf("failed to parse host index label: %w", err)
 		}
 	} else {
-		// Fallback for older KubeRay versions that do not set K8s index labels.
-		// Wait for PodInformer cache to update from previous requests.
-		timedout := t.cacheCond.Wait(1 * time.Second)
-		if timedout {
-			klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
-		}
+		err := func() error {
+			t.cacheMutex.Lock()
+			defer t.cacheMutex.Unlock()
 
-		// query k8s client to populate sliceToTPUHosts
-		sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
+			// Fallback for older KubeRay versions that do not set K8s index labels.
+			// Wait for PodInformer cache to update from previous requests.
+			timedout := t.cacheCond.Wait(1 * time.Second)
+			if timedout {
+				klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
+			}
+
+			// query k8s client to populate sliceToTPUHosts
+			sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
+			if err != nil {
+				return err
+			}
+
+			replicaIndex = getReplicaIndex(sliceToTPUHosts, clusterName, groupName, namespace)
+			podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
+			tpuWorkerID, err = getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
+			if err != nil {
+				return err
+			}
+
+			// Update state for next request.
+			t.cacheCond.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
+
+			// Manually inject the replicaIndex label
+			injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
+
+			return nil
+		}()
 		if err != nil {
 			return nil, err
 		}
-
-		replicaIndex = getReplicaIndex(sliceToTPUHosts, clusterName, groupName, namespace)
-		podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
-		tpuWorkerID, err = getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
-		if err != nil {
-			return nil, err
-		}
-
-		// Update state for next request.
-		t.cacheCond.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
-
-		// Manually inject the replicaIndex label
-		injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
 	}
 
 	headlessServiceName := generateHeadlessServiceName(clusterName)
