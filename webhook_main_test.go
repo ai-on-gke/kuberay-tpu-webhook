@@ -2105,6 +2105,47 @@ func Test_MutatePod_V7x(t *testing.T) {
 	}
 }
 
+// TestLegacyMutateGracefulDegradation verifies that two mutate requests can
+// concurrently complete without a cache sync, falling back to a timeout.
+func TestLegacyMutateGracefulDegradation(t *testing.T) {
+	// Running under synctest allows the timeout to occur instantly.
+	synctest.Test(t, func(t *testing.T) {
+		// Setup fake clientset and informer
+		fakeClient := fake.NewSimpleClientset()
+		// Use a non-zero resync period to avoid hitting non-bubbled global channels in client-go
+		factory := informers.NewSharedInformerFactory(fakeClient, 12*time.Hour)
+		podLister := factory.Core().V1().Pods().Lister()
+
+		stopCh := make(chan struct{})
+		defer close(stopCh)
+		factory.Start(stopCh)
+		synctest.Wait()
+
+		// Set up server with no informer callback.
+		tpuWebhookServer := NewTPUWebhookServer(podLister)
+
+		var wg sync.WaitGroup
+		for id := range 2 {
+			pod := getTestTPUWorker("my-cluster", "my-group", "default", "tpu-v4-podslice", "2x2x2", "4")
+			pod.Name = fmt.Sprintf("pod-%d", id)
+
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(pod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object = runtime.RawExtension{Object: pod}
+			admissionReview.Request.Namespace = "default"
+
+			body, _ := json.Marshal(admissionReview)
+			req := httptest.NewRequest("POST", "/mutate", bytes.NewReader(body))
+			w := httptest.NewRecorder()
+
+			wg.Go(func() { tpuWebhookServer.Mutate(w, req) })
+		}
+
+		wg.Wait()
+	})
+}
+
 func TestMutatePodLoad(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Parameters for the load test
