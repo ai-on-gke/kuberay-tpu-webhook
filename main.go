@@ -1060,20 +1060,24 @@ func init() {
 func (t *TPUWebhookServer) addPod(obj interface{}) {
 	pod := obj.(*corev1.Pod)
 	klog.V(1).InfoS("addPod", "Pod", pod.Namespace+"/"+pod.Name, "Time", time.Now())
+	if _, err := t.isLastAdmittedPod(pod); err != nil {
+		klog.V(0).ErrorS(err, "Failed to verify local cache from pod informer update", "name", pod.GetName())
+	}
+}
 
+func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 	if pod.Spec.Containers == nil || !containerRequestingTPUs(pod.Spec.Containers...) {
 		// Pod does not use TPUs.
-		return
+		return false, nil
 	}
 	replicaIndex := pod.Labels[legacyReplicaIndexLabelKey]
 	if replicaIndex == "" {
 		// Pod was not mutated by the webhook.
-		return
+		return false, nil
 	}
 	clusterName := pod.Labels[utils.RayClusterLabelKey]
 	if clusterName == "" {
-		klog.V(1).InfoS("Ray Pod created by KubeRay missing RayCluster label")
-		return
+		return false, errors.New("Ray Pod created by KubeRay missing RayCluster label")
 	}
 	namespace := pod.Namespace
 	for _, container := range pod.Spec.Containers {
@@ -1083,14 +1087,16 @@ func (t *TPUWebhookServer) addPod(obj interface{}) {
 		}
 		tpuWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 		if tpuWorkerID == "" {
-			// TPU pod was not intercepted by the webhook
+			// TPU pod container was not intercepted by the webhook.
 			continue
 		}
-		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
 
-		// Inform the cache control mechanism of the pod id.
-		t.cacheCond.Signal(uniquePodID)
+		// The pod has a TPU-configured container. There can only be one per
+		// pod. Inform the cache control mechanism of the pod id.
+		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
+		return t.cacheCond.Signal(uniquePodID), nil
 	}
+	return false, nil
 }
 
 // podSyncCond provides a synchronization primitive that allows the mutating
@@ -1162,8 +1168,8 @@ func (c *podSyncCond) Admit(pod string) {
 }
 
 // Signal marks a pod as received in the cache. The lock does not need to be
-// held.
-func (c *podSyncCond) Signal(pod string) {
+// held. Returns true if the cache is marked synced as a result.
+func (c *podSyncCond) Signal(pod string) bool {
 	c.m.Lock()
 	defer c.m.Unlock()
 	// If the pod received by the informer matches the one we last admitted --
@@ -1179,7 +1185,10 @@ func (c *podSyncCond) Signal(pod string) {
 		case c.wakeChan <- struct{}{}:
 		default:
 		}
+
+		return true
 	}
+	return false
 }
 
 // startServer sets up and runs the webhook's HTTP server.

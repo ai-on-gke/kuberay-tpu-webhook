@@ -1468,12 +1468,12 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 				tpuWebhookServer.cacheCond.lastAdmitted = tc.lastAdmitted
 			}
 
-			//isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
-			//if err != nil {
-			//	assert.Equal(t, tc.expectedError, err)
-			//} else {
-			//	assert.Equal(t, tc.isLastAdmitted, isLastAdmitted)
-			//}
+			isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
+			if err != nil {
+				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.Equal(t, tc.isLastAdmitted, isLastAdmitted)
+			}
 		})
 	}
 }
