@@ -791,38 +791,8 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			return nil, fmt.Errorf("failed to parse host index label: %w", err)
 		}
 	} else {
-		err := func() error {
-			t.cacheMutex.Lock()
-			defer t.cacheMutex.Unlock()
-
-			// Fallback for older KubeRay versions that do not set K8s index labels.
-			// Wait for PodInformer cache to update from previous requests.
-			timedout := t.cacheCond.Wait(1 * time.Second)
-			if timedout {
-				klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
-			}
-
-			// query k8s client to populate sliceToTPUHosts
-			sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
-			if err != nil {
-				return err
-			}
-
-			replicaIndex = getReplicaIndex(sliceToTPUHosts, clusterName, groupName, namespace)
-			podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
-			tpuWorkerID, err = getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
-			if err != nil {
-				return err
-			}
-
-			// Update state for next request.
-			t.cacheCond.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
-
-			// Manually inject the replicaIndex label
-			injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, &patches)
-
-			return nil
-		}()
+		// Fallback for older KubeRay versions that do not set K8s index labels.
+		replicaIndex, tpuWorkerID, err = t.legacyAssignIndices(pod, clusterName, groupName, namespace, numOfHosts, &patches)
 		if err != nil {
 			return nil, err
 		}
@@ -989,6 +959,39 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		return &pt
 	}()
 	return admissionResponse, nil
+}
+
+// legacyAssignIndices assigns replicaIndex and tpuWorkerID for older KubeRay versions.
+func (t *TPUWebhookServer) legacyAssignIndices(pod *corev1.Pod, clusterName, groupName, namespace string, numOfHosts int32, patches *[]patch) (int, int, error) {
+	t.cacheMutex.Lock()
+	defer t.cacheMutex.Unlock()
+
+	// Wait for PodInformer cache to update from previous requests.
+	timedout := t.cacheCond.Wait(1 * time.Second)
+	if timedout {
+		klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
+	}
+
+	// Query k8s client to populate sliceToTPUHosts.
+	sliceToTPUHosts, err := t.getSliceToTPUHosts(clusterName, groupName, namespace, numOfHosts)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	replicaIndex := getReplicaIndex(sliceToTPUHosts, clusterName, groupName, namespace)
+	podSlice := slice{clusterName, groupName, namespace, replicaIndex, numOfHosts}
+	tpuWorkerID, err := getNextWorkerID(sliceToTPUHosts, podSlice, namespace, replicaIndex)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// Update state for next request.
+	t.cacheCond.Admit(fmt.Sprintf("%s-%s-%s-%d-%d", namespace, clusterName, groupName, replicaIndex, tpuWorkerID))
+
+	// Manually inject the replicaIndex label
+	injectReplicaLabel(clusterName, namespace, replicaIndex, groupName, patches)
+
+	return replicaIndex, tpuWorkerID, nil
 }
 
 // buildTLSConfig builds a TLS config for the webhook server.
