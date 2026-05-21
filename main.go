@@ -967,8 +967,8 @@ func (t *TPUWebhookServer) legacyAssignIndices(pod *corev1.Pod, clusterName, gro
 	defer t.cacheMutex.Unlock()
 
 	// Wait for PodInformer cache to update from previous requests.
-	timedout := t.cacheCond.Wait(1 * time.Second)
-	if timedout {
+	timedOut := t.cacheCond.Wait(1 * time.Second)
+	if timedOut {
 		klog.V(0).Infof("Mutating pod %s with a stale cache", pod.GetName())
 	}
 
@@ -1101,8 +1101,10 @@ func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 			continue
 		}
 
-		// The pod has a TPU-configured container. There can only be one per
-		// pod. Inform the cache control mechanism of the pod id.
+		// The pod has a TPU-configured container. Inform the cache control
+		// mechanism of the pod id. It's sufficient return after inspecting the
+		// first TPU container (there can be no second TPU container with a
+		// different id).
 		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
 		return t.cacheCond.Signal(uniquePodID), nil
 	}
