@@ -418,6 +418,34 @@ func setupInformer(pods ...*corev1.Pod) listersv1.PodLister {
 	return factory.Core().V1().Pods().Lister()
 }
 
+// setupNodeInformer creates a NodeInformer, waits for cache to sync, and returns the Informer NodeLister
+func setupNodeInformer(nodes ...*corev1.Node) listersv1.NodeLister {
+	// initialize fake Clientset with node objects
+	tpuObjects := make([]runtime.Object, len(nodes))
+	for i, node := range nodes {
+		tpuObjects[i] = node
+	}
+	fakeClientSet := fake.NewSimpleClientset(tpuObjects...)
+
+	// initialize nodeLister using the fake client for testing
+	factory := informers.NewSharedInformerFactory(fakeClientSet, 0)
+	nodeInformer := factory.Core().V1().Nodes().Informer()
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	factory.Start(stopCh)
+	factory.WaitForCacheSync(stopCh)
+
+	// wait for cache to sync before creating the Lister
+	if !cache.WaitForCacheSync(stopCh, nodeInformer.HasSynced) {
+		fmt.Printf("Timed out waiting for fake client to sync")
+		return nil
+	}
+
+	return factory.Core().V1().Nodes().Lister()
+}
+
 func Test_GetReplicaIndex(t *testing.T) {
 	tests := map[string]struct {
 		sliceToTPUHosts      map[slice][]int
@@ -1008,8 +1036,8 @@ func Test_InjectAffinity(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			var patches []patch
-
-			injectAffinity(tc.testPod, tc.replicaIndex, tc.groupName, &patches)
+			tpuWebhookServer := NewTPUWebhookServer(nil, nil)
+			tpuWebhookServer.injectAffinity(tc.testPod, tc.replicaIndex, 2, tc.groupName, &patches)
 
 			assert.Len(t, patches, 1)
 			assert.Equal(t, "/spec/affinity", patches[0]["path"])
@@ -1052,6 +1080,53 @@ func Test_InjectAffinity(t *testing.T) {
 			assert.NotNil(t, podAntiAffinityTerms[1].NamespaceSelector)
 		})
 	}
+}
+
+func Test_InjectAffinity_Merging(t *testing.T) {
+	clusterName := "test-cluster"
+	workerGroupName := "tpu-group"
+	replicaIndex := 1
+	topologyKey := gceTopologySubblockLabel
+
+	// Pod with existing affinity
+	pod := getTestTPUWorker(clusterName, workerGroupName, "default", "tpu-v4-podslice", "2x2x1", "4")
+	pod.Spec.Affinity = &corev1.Affinity{
+		PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{
+					LabelSelector: &metav1.LabelSelector{
+						MatchExpressions: []metav1.LabelSelectorRequirement{
+							{
+								Key:      "existing-key",
+								Operator: metav1.LabelSelectorOpIn,
+								Values:   []string{"existing-value"},
+							},
+						},
+					},
+					TopologyKey: topologyKey,
+				},
+			},
+		},
+	}
+
+	var patches []patch
+	tpuWebhookServer := NewTPUWebhookServer(nil, nil)
+	tpuWebhookServer.injectAffinity(pod, replicaIndex, 2, workerGroupName, &patches)
+
+	assert.Equal(t, 1, len(patches))
+	affinityPatch := patches[0]["value"].(corev1.Affinity)
+
+	// Check if existing affinity is preserved
+	assert.Equal(t, 2, len(affinityPatch.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+	assert.Equal(t, "existing-key", affinityPatch.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].LabelSelector.MatchExpressions[0].Key)
+
+	// Check if new affinity uses the same topologyKey
+	assert.Equal(t, topologyKey, affinityPatch.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[1].TopologyKey)
+
+	// Check if anti-affinity also uses the same topologyKey
+	assert.Equal(t, 2, len(affinityPatch.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+	assert.Equal(t, topologyKey, affinityPatch.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey)
+	assert.Equal(t, topologyKey, affinityPatch.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[1].TopologyKey)
 }
 
 func Test_CheckWorkersMatchTopology(t *testing.T) {
@@ -1146,6 +1221,21 @@ func Test_CheckWorkersMatchTopology(t *testing.T) {
 			assert.Equal(t, tc.workersMatch, workersMatchTopology)
 		})
 	}
+}
+
+func Test_CheckWorkersMatchTopology_Subslice(t *testing.T) {
+	// WorkerGroupSpec with 4x4 topology in nodeSelector, but 2x4 in subslice annotation.
+	// 2x4 with 4 chips per host = 8 chips total / 4 chips per host = 2 hosts.
+	workerGroupSpec := getTestTPUWorkerGroup("tpu-group", 2, 1, "tpu-v6e-slice", "4x4", "4")
+	if workerGroupSpec.Template.Annotations == nil {
+		workerGroupSpec.Template.Annotations = make(map[string]string)
+	}
+	workerGroupSpec.Template.Annotations["cloud.google.com/gke-tpu-subslice-topology"] = "2x4"
+
+	// Should match because it prefers the 2x4 subslice annotation.
+	workersMatch, err := checkWorkersMatchTopology("test-cluster", "default", *workerGroupSpec)
+	assert.NoError(t, err)
+	assert.True(t, workersMatch)
 }
 
 func Test_ValidateRayCluster(t *testing.T) {
@@ -1245,7 +1335,9 @@ func Test_ValidateRayCluster(t *testing.T) {
 			admissionReview.Request.Object.Object = tc.rayCluster
 
 			// test validateRayCluster admissionResponse output
-			admissionResponse, _ := validateRayCluster(admissionReview)
+			tpuWebhookServer := NewTPUWebhookServer(nil, nil)
+			admissionResponse, err := tpuWebhookServer.validateRayCluster(admissionReview)
+			assert.NoError(t, err)
 			if admissionResponse != nil {
 				assert.Equal(t, tc.expectedAllowed, admissionResponse.Allowed)
 				assert.Equal(t, tc.expectedResult.Status, admissionResponse.Result.Status)
@@ -1327,6 +1419,75 @@ func Test_GetEnvironmentVariable(t *testing.T) {
 	}
 }
 
+func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
+	// Mock nodes: only single hosts
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-1",
+				Labels: map[string]string{
+					gkeNodePoolLabel:                       "tpu-pool",
+					gceTopologyBlockLabel:                  "block-1",
+					gceTopologySubblockLabel:               "subblock-1",
+					gceTopologyHostLabel:                   "host-1",
+					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
+					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					"tpu-type":                             "v4",
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-2",
+				Labels: map[string]string{
+					gkeNodePoolLabel:                       "tpu-pool",
+					gceTopologyBlockLabel:                  "block-2",
+					gceTopologySubblockLabel:               "subblock-2",
+					gceTopologyHostLabel:                   "host-2",
+					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
+					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					"tpu-type":                             "v4",
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-3",
+				Labels: map[string]string{
+					gkeNodePoolLabel:                       "tpu-pool",
+					gceTopologyBlockLabel:                  "block-3",
+					gceTopologySubblockLabel:               "subblock-3",
+					gceTopologyHostLabel:                   "host-3",
+					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
+					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					"tpu-type":                             "v4",
+				},
+			},
+		},
+	}
+
+	// RayCluster requesting 2 hosts in subslice, but nodes are spread across blocks/subblocks
+	// 2x2x1 = 4 chips. With 2 chips per host, expectedHosts = 2.
+	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		"cloud.google.com/gke-tpu-subslice-topology": "2x2x1",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector["tpu-type"] = "v4"
+
+	nodeLister := setupNodeInformer(nodes...)
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.False(t, resp.Allowed)
+	assert.Equal(t, "Ambiguous subslice", resp.Result.Message)
+}
+
 func Test_getSliceToTPUHosts(t *testing.T) {
 	testCPUWorker := getTestCPUWorker("test-cluster", "test-group", "test-namespace")
 	testTPUWorker := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
@@ -1369,7 +1530,7 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			podLister := setupInformer(tc.podsInGroup...)
-			tpuWebhook := NewTPUWebhookServer(podLister)
+			tpuWebhook := NewTPUWebhookServer(podLister, nil)
 			sliceToTPUHosts, err := tpuWebhook.getSliceToTPUHosts("test-cluster", "test-group", "test-namespace", tc.numOfHosts)
 
 			// sliceToTPUHosts should be populated with slices and unique TPU_WORKER_IDs for each Pod
@@ -1427,7 +1588,7 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 
 			// set up TPUWebhookServer
 			testPodLister := setupInformer(testPod)
-			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, nil)
 
 			if tc.useMutate {
 				// Prepare admission review
@@ -1518,7 +1679,7 @@ func Test_MutatePod(t *testing.T) {
 			// requests TPUs, topology not specified - returns error
 			testPod:           getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "", "4"),
 			missingContainers: false,
-			expectedError:     errors.New("Ray Pod created by KubeRay missing TPU topology nodeSelector"),
+			expectedError:     errors.New("Ray Pod created by KubeRay missing TPU topology"),
 		},
 		"mutatePod in single-host TPU worker group": {
 			// requests TPUs, single-host - injects TPU_WORKER_ID, TPU_NAME and replicaIndex label
@@ -1654,7 +1815,7 @@ func Test_MutatePod(t *testing.T) {
 			testPodLister := setupInformer(testTPUPods...)
 
 			// set up TPUWebhookServer
-			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, nil)
 			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
 
 			if tc.expectedError != nil {
@@ -1778,6 +1939,57 @@ func Test_MutatePod(t *testing.T) {
 	}
 }
 
+func Test_MutatePod_Subslice(t *testing.T) {
+	// Pod with 4x4 topology in nodeSelector, but 2x4 in subslice annotation.
+	pod := getTestTPUWorker("test-cluster", "tpu-group", "default", "tpu-v6e-slice", "4x4", "4")
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations["cloud.google.com/gke-tpu-subslice-topology"] = "2x4"
+
+	// set up admissionReview object
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	testPodLister := setupInformer()
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, nil)
+
+	// mutatePod should succeed and use 2x4 (2 hosts) instead of 4x4 (4 hosts)
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.True(t, admissionResponse.Allowed)
+
+	var patches []patch
+	json.Unmarshal(admissionResponse.Patch, &patches)
+
+	// Check if TPU_WORKER_HOSTNAMES contains only 2 hosts (from 2x4)
+	foundHostnames := false
+	for _, p := range patches {
+		if valMap, ok := p["value"].(map[string]interface{}); ok {
+			if valMap["name"] == "TPU_WORKER_HOSTNAMES" {
+				hostnames := valMap["value"].(string)
+				hosts := strings.Split(hostnames, ",")
+				assert.Equal(t, 2, len(hosts), "Expected 2 hosts in TPU_WORKER_HOSTNAMES for 2x4 subslice")
+				foundHostnames = true
+			}
+		} else if valSlice, ok := p["value"].([]interface{}); ok {
+			for _, v := range valSlice {
+				if valMap, ok := v.(map[string]interface{}); ok {
+					if valMap["name"] == "TPU_WORKER_HOSTNAMES" {
+						hostnames := valMap["value"].(string)
+						hosts := strings.Split(hostnames, ",")
+						assert.Equal(t, 2, len(hosts), "Expected 2 hosts in TPU_WORKER_HOSTNAMES for 2x4 subslice")
+						foundHostnames = true
+					}
+				}
+			}
+		}
+	}
+	assert.True(t, foundHostnames, "TPU_WORKER_HOSTNAMES patch not found")
+}
+
 func Test_GenerateHeadlessServiceName(t *testing.T) {
 	tests := map[string]struct {
 		testRayClusterName  string
@@ -1878,7 +2090,7 @@ func TestWebhookCertReloadsOnChange(t *testing.T) {
 
 	// Start the webhook server.
 	go func() {
-		err := startServer(NewTPUWebhookServer(nil))
+		err := startServer(NewTPUWebhookServer(nil, nil))
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			t.Logf("Webhook server failed unexpectedly: %v", err)
 		}
@@ -2032,7 +2244,7 @@ func Test_MutatePod_V7x(t *testing.T) {
 			admissionReview.Request.Object.Object = inputPod
 
 			testPodLister := setupInformer()
-			tpuWebhookServer := NewTPUWebhookServer(testPodLister)
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, nil)
 
 			// Validate Pod mutation for a Ironwood (v7x) TPU Pod contains the expected patches.
 			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
@@ -2122,7 +2334,7 @@ func TestLegacyMutateGracefulDegradation(t *testing.T) {
 		synctest.Wait()
 
 		// Set up server with no informer callback.
-		tpuWebhookServer := NewTPUWebhookServer(podLister)
+		tpuWebhookServer := NewTPUWebhookServer(podLister, nil)
 
 		var wg sync.WaitGroup
 		for id := range 2 {
@@ -2167,7 +2379,7 @@ func TestMutatePodLoad(t *testing.T) {
 		factory.Start(stopCh)
 		synctest.Wait()
 
-		tpuWebhookServer := NewTPUWebhookServer(podLister)
+		tpuWebhookServer := NewTPUWebhookServer(podLister, nil)
 		podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc: tpuWebhookServer.addPod,
 		})
