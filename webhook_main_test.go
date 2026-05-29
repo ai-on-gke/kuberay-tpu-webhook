@@ -1450,6 +1450,80 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 	assert.Equal(t, "ambiguous subslice: could not find affinity rule to schedule 2 hosts", resp.Result.Message)
 }
 
+func Test_ValidateRayCluster_SubsliceZeroNodesWarning(t *testing.T) {
+	// RayCluster requesting 2 hosts in subslice, targeting nodes in a nodepool
+	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
+		"cloud.google.com/gke-nodepool": "empty-tpu-pool",
+	}
+
+	// No nodes are provisioned yet (scaled to 0)
+	nodeLister := setupNodeInformer()
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.True(t, resp.Allowed)
+	assert.Equal(t, "Success", resp.Result.Status)
+	assert.Len(t, resp.Warnings, 1)
+	assert.Contains(t, resp.Warnings[0], "targets zero nodes (cannot discover subslice affinity) and will need to be re-created after nodes are provisioned.")
+}
+
+func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
+	// Mock nodes: only single hosts of size 1, so requesting 2 hosts is ambiguous/fails
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-1",
+				Labels: map[string]string{
+					gkeNodePoolLabel:                       "tpu-pool",
+					gceTopologyHostLabel:                   "host-1",
+					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
+					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					"tpu-type":                             "v4",
+				},
+			},
+		},
+	}
+
+	// RayCluster with TWO worker groups:
+	// Group 1: requests 2 hosts in subslice (should fail subslice affinity check with ambiguous subslice)
+	// Group 2: requests 4 hosts, but topology nodeSelector does not match (fails workersMatchTopology check)
+	rayCluster := getTestRayCluster("test-cluster", "tpu-group-1", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector["tpu-type"] = "v4"
+
+	// Add group 2 which fails the workersMatchTopology validation
+	group2 := *getTestTPUWorkerGroup("tpu-group-2", 4, 1, "tpu-v4-podslice", "2x2x1", "4")
+	rayCluster.Spec.WorkerGroupSpecs = append(rayCluster.Spec.WorkerGroupSpecs, group2)
+
+	nodeLister := setupNodeInformer(nodes...)
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.False(t, resp.Allowed)
+	assert.Equal(t, "Failure", resp.Result.Status)
+	// Crucially, because we break immediately on Group 1's failure, the message should be Group 1's subslice failure,
+	// NOT Group 2's worker topology mismatch error!
+	assert.Equal(t, "ambiguous subslice: could not find affinity rule to schedule 2 hosts", resp.Result.Message)
+}
+
 func Test_getSliceToTPUHosts(t *testing.T) {
 	testCPUWorker := getTestCPUWorker("test-cluster", "test-group", "test-namespace")
 	testTPUWorker := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
