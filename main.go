@@ -513,7 +513,7 @@ func checkWorkersMatchTopology(clusterName string, namespace string, workerGroup
 		if !ok {
 			topology = workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
 		}
-		klog.V(1).InfoS("checkWorkersMatchTopology", "RayCluster", namespace+"/"+clusterName, "topology", topology, "NumOfHosts", numHosts)
+		klog.V(0).InfoS("checkWorkersMatchTopology", "RayCluster", namespace+"/"+clusterName, "topology", topology, "NumOfHosts", numHosts)
 		if topology == "" {
 			err := errors.New("TPU topology not specified")
 			klog.ErrorS(err, "checkWorkersMatchTopology", "RayCluster", namespace+"/"+clusterName, "topology", topology)
