@@ -1447,7 +1447,7 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
 	assert.NoError(t, err)
 	assert.False(t, resp.Allowed)
-	assert.Equal(t, "Ambiguous subslice: could not find affinity rule to schedule 2 hosts", resp.Result.Message)
+	assert.Equal(t, "ambiguous subslice: could not find affinity rule to schedule 2 hosts", resp.Result.Message)
 }
 
 func Test_getSliceToTPUHosts(t *testing.T) {
@@ -1641,7 +1641,7 @@ func Test_MutatePod(t *testing.T) {
 			// requests TPUs, topology not specified - returns error
 			testPod:           getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "", "4"),
 			missingContainers: false,
-			expectedError:     errors.New("Ray Pod created by KubeRay missing TPU topology"),
+			expectedError:     errors.New("Ray Pod created by KubeRay missing TPU topology nodeSelector"),
 		},
 		"mutatePod in single-host TPU worker group": {
 			// requests TPUs, single-host - injects TPU_WORKER_ID, TPU_NAME and replicaIndex label

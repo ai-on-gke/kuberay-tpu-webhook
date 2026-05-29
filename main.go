@@ -466,7 +466,7 @@ func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, num
 		},
 	}
 
-	// Incorporate existing affinity if present
+	// Incorporate existing affinity if present.
 	combinedAffinity := corev1.Affinity{}
 	if pod.Spec.Affinity != nil {
 		combinedAffinity = *pod.Spec.Affinity.DeepCopy()
@@ -627,7 +627,7 @@ func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroup
 	topology.prettyPrint()
 	topologyKey, err := topology.subsliceAffinityKey(numHosts)
 	if err != nil {
-		return "", fmt.Errorf("Ambiguous subslice: %w", err), nil
+		return "", fmt.Errorf("ambiguous subslice: %w", err), nil
 	}
 
 	// The mapping of TPU type, slice, and subslice should always
@@ -871,7 +871,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		topology = pod.Spec.NodeSelector[tpuTopologyLabel]
 	}
 	if topology == "" {
-		return nil, errors.New("Ray Pod created by KubeRay missing TPU topology")
+		return nil, errors.New("Ray Pod created by KubeRay missing TPU topology nodeSelector")
 	}
 	// assign worker to the next unique ID in the Pod Slice and update map
 	chipsPerHost := getNumTPUChipsRequested(containers...)
@@ -1506,7 +1506,7 @@ func main() {
 		klog.Fatal("Failed to initialize Node Lister")
 	}
 
-	// close the Informers on exit
+	// close the informers on exit
 	defer close(stopCh)
 
 	tpuWebhookServer := NewTPUWebhookServer(podLister, nodeLister)
