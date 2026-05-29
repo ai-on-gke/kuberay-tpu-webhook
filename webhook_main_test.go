@@ -390,60 +390,22 @@ func getTestRayCluster(clusterName string, groupName string, namespace string, n
 	return rayCluster
 }
 
-// setupInformer creates a PodInformer, waits for cache to sync, and returns the Informer PodLister
+// setupInformer creates a PodLister from the provided pods using a static indexer.
 func setupInformer(pods ...*corev1.Pod) listersv1.PodLister {
-	// initialize fake Clientset with pod objects
-	tpuObjects := make([]runtime.Object, len(pods))
-	for i, pod := range pods {
-		tpuObjects[i] = pod
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, pod := range pods {
+		indexer.Add(pod)
 	}
-	fakeClientSet := fake.NewSimpleClientset(tpuObjects...)
-
-	// initialize podLister using the fake client for testing
-	factory := informers.NewSharedInformerFactory(fakeClientSet, 0)
-	podInformer := factory.Core().V1().Pods().Informer()
-
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-
-	// wait for cache to sync before creating the Lister
-	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {
-		fmt.Printf("Timed out waiting for fake client to sync")
-		return nil
-	}
-
-	return factory.Core().V1().Pods().Lister()
+	return listersv1.NewPodLister(indexer)
 }
 
-// setupNodeInformer creates a NodeInformer, waits for cache to sync, and returns the Informer NodeLister
+// setupNodeInformer creates a NodeLister from the provided nodes using a static indexer.
 func setupNodeInformer(nodes ...*corev1.Node) listersv1.NodeLister {
-	// initialize fake Clientset with node objects
-	tpuObjects := make([]runtime.Object, len(nodes))
-	for i, node := range nodes {
-		tpuObjects[i] = node
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for _, node := range nodes {
+		indexer.Add(node)
 	}
-	fakeClientSet := fake.NewSimpleClientset(tpuObjects...)
-
-	// initialize nodeLister using the fake client for testing
-	factory := informers.NewSharedInformerFactory(fakeClientSet, 0)
-	nodeInformer := factory.Core().V1().Nodes().Informer()
-
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-
-	// wait for cache to sync before creating the Lister
-	if !cache.WaitForCacheSync(stopCh, nodeInformer.HasSynced) {
-		fmt.Printf("Timed out waiting for fake client to sync")
-		return nil
-	}
-
-	return factory.Core().V1().Nodes().Lister()
+	return listersv1.NewNodeLister(indexer)
 }
 
 func Test_GetReplicaIndex(t *testing.T) {
