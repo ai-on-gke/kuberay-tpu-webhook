@@ -1479,7 +1479,10 @@ func main() {
 	podInformer := factory.Core().V1().Pods().Informer()
 
 	// instantiate NodeInformer for TPU nodes in the GKE cluster
-	nodeFactory := informers.NewSharedInformerFactory(client, 1*time.Minute)
+	tweakNodeListOptionsFunc := func(options *metav1.ListOptions) {
+		options.LabelSelector = "cloud.google.com/gke-tpu-accelerator"
+	}
+	nodeFactory := informers.NewFilteredSharedInformerFactory(client, 1*time.Minute, metav1.NamespaceAll, tweakNodeListOptionsFunc)
 	nodeInformer := nodeFactory.Core().V1().Nodes().Informer()
 
 	// start the Informers and wait for cache sync
