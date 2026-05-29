@@ -67,6 +67,7 @@ When you submit a RayCluster resource requesting TPUs, this mutating webhook int
 * **Worker Identification:** Calculates and injects `TPU_WORKER_ID` and `TPU_NAME` (a unique identifier for the replica group) for multi-host and multi-container coordination.
 * **Multi-Container (NUMA) Support:** Natively supports v7x Pods that run multiple NUMA-aligned containers, assigning unique ports and IDs to each ML process. It's important to note that multi-node support per Pod with KubeRay is experimental.
 * **Megascale (Multi-Slice) Support:** If `MEGASCALE_NUM_SLICES` is set explicitly in the Pod spec of your Ray container, the webhook automatically calculates and injects `MEGASCALE_SLICE_ID`, `MEGASCALE_COORDINATOR_ADDRESS`, and `MEGASCALE_PORT`. If utilizing the [JaxTrainer](https://docs.ray.io/en/latest/train/api/doc/ray.train.v2.jax.JaxTrainer.html#ray.train.v2.jax.JaxTrainer) in Ray Train, `MEGASCALE_NUM_SLICES` and related env vars are calculated for you based on the value of `num_workers`, `accelerator_type`, and `topology` and set automatically at runtime.
+* **TPU Subslicing Support:** If `cloud.google.com/gke-tpu-slice-topology` is set as an annotation on the Pod template, the webhook automatically calculates and injects the appropriate `nodeAffinity` (e.g., `cloud.google.com/gce-topology-subblock`) to ensure that all hosts in a subslice are co-located on the same physical grouping within a larger TPU slice. This enables running multiple independent smaller workloads on a single large TPU reservation.
 * **Device Plugin Routing:** Injects `TPU_DEVICE_PLUGIN_HOST_IP` and `TPU_DEVICE_PLUGIN_ADDR` to ensure the container communicates with the correct node-level hardware plugin. These environment variables are utilized in Ray to scrape per-node metrics like Tensor Core utilization, HBM utilization, TPU duty cycle, and memory usage which are then viewable on the Ray Dashboard. See [View TPU metrics on the Ray Dashboard](https://docs.cloud.google.com/kubernetes-engine/docs/add-on/ray-on-gke/how-to/view-tpu-metrics).
 
 ## Validating Webhook Rules
@@ -82,6 +83,7 @@ The webhook evaluates each `workerGroupSpec` against the following rules:
     * **Expected Hosts:** `max(Total Chips / Chips Per Host, 1)`
     * If the calculated `Expected Hosts` does not exactly match the `numOfHosts` defined in your `workerGroupSpec`, the cluster is rejected with the error: `"Number of workers in worker group not equal to specified topology"`.
   * **Example:** If your node selector specifies a `2x2x2` topology (8 total chips) and your container requests `4` TPUs (`google.com/tpu: "4"`), your `numOfHosts` must be set to `2`.
+* **Subslice Ambiguity Validation:** If a subslice is requested via the `cloud.google.com/gke-tpu-slice-topology` annotation, the webhook verifies that the requested `numOfHosts` corresponds to a unique physical grouping (block, subblock, etc.) available in the targeted nodes. If the request is ambiguous or no grouping matches the host count, the cluster is rejected.
 
 ## Install the KubeRay TPU Webhook from Source
 
