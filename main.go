@@ -608,7 +608,7 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 
 func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroupSpec, desiredSubslice string) (warning string, admitErr, err error) {
 	numHosts := int(workerGroupSpec.NumOfHosts)
-	if numHosts < 1 {
+	if numHosts <= 1 {
 		// Single-host workers can run anywhere.
 		return "", nil, nil
 	}

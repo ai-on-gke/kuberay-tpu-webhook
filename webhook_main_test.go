@@ -1524,6 +1524,34 @@ func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
 	assert.Equal(t, "ambiguous subslice: could not find affinity rule to schedule 2 hosts", resp.Result.Message)
 }
 
+func Test_ValidateRayCluster_SubsliceSingleHostExitsEarly(t *testing.T) {
+	// RayCluster requesting 1 host with subslice annotation.
+	// Since numOfHosts is 1, it should immediately exit early with Success and no warnings,
+	// even if the targeted nodepool has zero nodes.
+	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 1, 1, "4", "tpu-v4-podslice", "2x2x1", false)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
+		"cloud.google.com/gke-nodepool": "empty-tpu-pool",
+	}
+
+	// No nodes are provisioned (scaled to 0)
+	nodeLister := setupNodeInformer()
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.True(t, resp.Allowed)
+	assert.Equal(t, "Success", resp.Result.Status)
+	assert.Len(t, resp.Warnings, 0, "Expected no warnings since single-host subslice skips node discovery")
+}
+
 func Test_getSliceToTPUHosts(t *testing.T) {
 	testCPUWorker := getTestCPUWorker("test-cluster", "test-group", "test-namespace")
 	testTPUWorker := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
