@@ -30,7 +30,7 @@ vet:
 
 # Run go test against code.
 test:
-	go test ./...
+	go test -race -timeout 1m ./...
 
 # Run E2E tests.
 e2e:
