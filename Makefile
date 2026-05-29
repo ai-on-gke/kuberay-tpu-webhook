@@ -57,5 +57,10 @@ deploy-cert:
 uninstall-cert:
 	kubectl delete -f certs/
 
-.PHONY: webhook run fmt vet test e2e deploy uninstall docker-build docker-push deploy-cert uninstall-cert
+img-swap:
+	docker build . -t ${IMG}
+	docker push ${IMG}
+	EDITOR="sed -i \"s|^\( \+\)image: .*$$|\1image: ${IMG}|\"" kubectl edit deployment -n ray-system kuberay-tpu-webhook
+
+.PHONY: webhook run fmt vet test e2e deploy uninstall docker-build docker-push deploy-cert uninstall-cert img-swap
 
