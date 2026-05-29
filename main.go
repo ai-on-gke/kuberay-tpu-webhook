@@ -24,9 +24,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,7 +85,7 @@ const (
 	tpu7xType          = "tpu7x"
 
 	tpuTopologyLabel              = "cloud.google.com/gke-tpu-topology"
-	tpuSubsliceTopologyAnnotation = "cloud.google.com/gke-tpu-subslice-topology"
+	tpuSubsliceTopologyAnnotation = "cloud.google.com/gke-tpu-slice-topology"
 	legacyReplicaIndexLabelKey    = "replicaIndex"
 
 	// Topology labels
@@ -374,18 +376,28 @@ func getGKETopologyKey(pod *corev1.Pod) string {
 
 // injectAffinity injects pod affinity and anti-affinity scheduling constraints using replicaIndex and cluster labels
 // to ensure TPU Pods from the same multi-host replica are co-located.
-func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, numOfHosts int, workerGroupName string, patches *[]patch) {
+func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, numOfHosts int, workerGroupName string, patches *[]patch) error {
 	clusterName := pod.Labels[utils.RayClusterLabelKey]
 	topologyKey := getGKETopologyKey(pod)
 
 	// If the current topology key is the default nodepool, attempt to discover a more specific one (block/subblock).
-	if topologyKey == "cloud.google.com/gke-nodepool" && t != nil && t.nodeLister != nil {
+	if _, subsliceRequested := pod.Annotations[tpuSubsliceTopologyAnnotation]; subsliceRequested {
 		selector := labels.SelectorFromSet(pod.Spec.NodeSelector)
 		nodes, err := t.nodeLister.List(selector)
 		if err == nil && len(nodes) > 0 {
-			if key, err := subsliceAffinityKey(numOfHosts, nodes); err == nil {
+			topology := buildTPUTopology(nodes)
+			if key, err := topology.subsliceAffinityKey(numOfHosts); err == nil {
 				topologyKey = key
 			}
+		} else if err != nil {
+			klog.V(0).ErrorS(err, "Cannot choose subslice affinity key, list nodes returned err")
+			return err
+		} else if len(nodes) == 0 {
+			klog.V(0).Info("Cannot choose subslice affinity key, no nodes exist for choose subslice affinity")
+			// This is not an error because the pod may need to be admitted to
+			// trigger scale up.
+			// It will almost certainly be scheduled incorrectly, but the
+			// RayCluster admission should have already warned the user.
 		}
 	}
 
@@ -481,6 +493,7 @@ func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, num
 		"path":  "/spec/affinity",
 		"value": combinedAffinity,
 	})
+	return nil
 }
 
 // checkWorkersMatchTopology returns whether the # of Ray TPU worker pods equals the # of hosts defined in the topology key
@@ -534,6 +547,7 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 	admit := true
 	status := "Success"
 	message := ""
+	var warnings []string
 	clusterName := raycluster.Name
 	if clusterName == "" {
 		clusterName = admissionReview.Request.Name
@@ -562,20 +576,18 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 		}
 
 		// If sub-slicing is requested, ensure we can find a satisfying topology key.
-		if _, subsliceRequested := workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation]; subsliceRequested {
-			numHosts := int(workerGroupSpec.NumOfHosts)
-			if numHosts > 1 && t.nodeLister != nil {
-				selector := labels.SelectorFromSet(workerGroupSpec.Template.Spec.NodeSelector)
-				nodes, err := t.nodeLister.List(selector)
-				if err != nil {
-					return nil, err
-				}
-				if _, err := subsliceAffinityKey(numHosts, nodes); err != nil {
-					admit = false
-					status = "Failure"
-					message = "Ambiguous subslice"
-					break
-				}
+		if desiredSubslice, subsliceRequested := workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation]; subsliceRequested {
+			warning, admitErr, err := t.checkSubsliceAffinity(workerGroupSpec, desiredSubslice)
+			if err != nil {
+				return nil, err
+			}
+			if admitErr != nil {
+				admit = false
+				status = "Failure"
+				message = admitErr.Error()
+			}
+			if len(warning) > 0 {
+				warnings = append(warnings, warning)
 			}
 		}
 	}
@@ -588,8 +600,44 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 			Status:  status,
 			Message: message,
 		},
+		Warnings: warnings,
 	}
 	return admissionResponse, nil
+}
+
+func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroupSpec, desiredSubslice string) (warning string, admitErr, err error) {
+	numHosts := int(workerGroupSpec.NumOfHosts)
+	if numHosts < 1 {
+		// Single-host workers can run anywhere.
+		return "", nil, nil
+	}
+	selector := labels.SelectorFromSet(workerGroupSpec.Template.Spec.NodeSelector)
+
+	nodes, err := t.nodeLister.List(selector)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if len(nodes) == 0 {
+		warning := fmt.Sprintf("Subsliced TPU worker group %q targets zero nodes (cannot discover subslice affinity) and will need to be re-created after nodes are provisioned.", workerGroupSpec.GroupName)
+		return warning, nil, nil
+	}
+
+	topology := buildTPUTopology(nodes)
+	topology.prettyPrint()
+	topologyKey, err := topology.subsliceAffinityKey(numHosts)
+	if err != nil {
+		return "", fmt.Errorf("Ambiguous subslice: %w", err), nil
+	}
+
+	// The mapping of TPU type, slice, and subslice should always
+	// result in the same topologyKey. Log this mapping for
+	// debuggability.
+	parentTopology := workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
+	tpuType := workerGroupSpec.Template.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]
+	klog.V(0).Infof("subslice (type=%q, parent=%q, slice=%q) -> %q", tpuType, parentTopology, desiredSubslice, topologyKey)
+
+	return "", nil, nil
 }
 
 // getEnvironmentVariable returns value associated with a given Container environment variable and if it exists
@@ -886,8 +934,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 		injectSubdomain(clusterName, &patches)
 
-		// inject pod affinity/anti-affinity for scheduling
-		t.injectAffinity(pod, replicaIndex, int(numOfHosts), groupName, &patches)
+		// inject pod affinity/anti-affinity for scheduling.
+		if err := t.injectAffinity(pod, replicaIndex, int(numOfHosts), groupName, &patches); err != nil {
+			return nil, err
+		}
 	}
 
 	// inject all environment variables into the container requesting TPUs
@@ -1280,17 +1330,8 @@ func (c *podSyncCond) Signal(pod string) bool {
 	return false
 }
 
-func subsliceAffinityKey(numHosts int, nodes []*corev1.Node) (string, error) {
-	topology := buildTPUTopology(nodes)
-	topology.PrettyPrint()
-
-	unit, ok := topology.hasUnit(numHosts)
-	if !ok {
-		return "", fmt.Errorf("could not find affinity rule to schedule %d hosts", numHosts)
-	}
-	return unit, nil
-}
-
+// TPUTopology indexes the statically discoverable topology labels for TPU
+// nodes.
 type TPUTopology struct {
 	Hosts     map[string][]*corev1.Node
 	Subblocks map[string][]*corev1.Node
@@ -1306,10 +1347,12 @@ func buildTPUTopology(nodes []*corev1.Node) *TPUTopology {
 		NodePools: make(map[string][]*corev1.Node),
 	}
 	for _, node := range nodes {
-		pool := node.Labels[gkeNodePoolLabel]
-		block := node.Labels[gceTopologyBlockLabel]
-		subblock := node.Labels[gceTopologySubblockLabel]
-		host := node.Labels[gceTopologyHostLabel]
+		var (
+			pool     = node.Labels[gkeNodePoolLabel]
+			block    = node.Labels[gceTopologyBlockLabel]
+			subblock = node.Labels[gceTopologySubblockLabel]
+			host     = node.Labels[gceTopologyHostLabel]
+		)
 
 		if pool != "" {
 			t.NodePools[pool] = append(t.NodePools[pool], node)
@@ -1327,74 +1370,51 @@ func buildTPUTopology(nodes []*corev1.Node) *TPUTopology {
 	return t
 }
 
-func (t *TPUTopology) PrettyPrint() {
+// prettyPrint logs the sizes of the node label select-able TPU groups.
+func (t *TPUTopology) prettyPrint() {
 	klog.V(0).Info("TPU Topology:")
-
-	// Group nodes hierarchically for logging
-	type hostMap map[string][]string
-	type subblockMap map[string]hostMap
-	type blockMap map[string]subblockMap
-	type poolMap map[string]blockMap
-
-	tree := make(poolMap)
-
-	for poolName, nodes := range t.NodePools {
-		tree[poolName] = make(blockMap)
-		for _, node := range nodes {
-			block := node.Labels["cloud.google.com/gce-topology-block"]
-			subblock := node.Labels["cloud.google.com/gce-topology-subblock"]
-			host := node.Labels["cloud.google.com/gce-topology-host"]
-
-			if tree[poolName][block] == nil {
-				tree[poolName][block] = make(subblockMap)
-			}
-			if tree[poolName][block][subblock] == nil {
-				tree[poolName][block][subblock] = make(hostMap)
-			}
-			tree[poolName][block][subblock][host] = append(tree[poolName][block][subblock][host], node.Name)
-		}
-	}
-
-	for poolName, blocks := range tree {
-		klog.V(0).Infof("  Pool: %s (size: %d)", poolName, len(t.NodePools[poolName]))
-		for blockName, subblocks := range blocks {
-			klog.V(0).Infof("    Block: %s (size: %d)", blockName, len(t.Blocks[blockName]))
-			for subblockName, hosts := range subblocks {
-				klog.V(0).Infof("      Subblock: %s (size: %d)", subblockName, len(t.Subblocks[subblockName]))
-				for hostName, nodeNames := range hosts {
-					klog.V(0).Infof("        Host: %s -> Nodes: %v", hostName, nodeNames)
-				}
-			}
-		}
-	}
+	klog.V(0).Infof("Host      has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.Hosts))
+	klog.V(0).Infof("Subblocks has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.Subblocks))
+	klog.V(0).Infof("Blocks    has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.Blocks))
+	klog.V(0).Infof("NodePools has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.NodePools))
 }
 
-func (t *TPUTopology) hasUnit(n int) (string, bool) {
+func sliceLengths[K comparable, T any](m map[K][]T) []int {
+	lens := make(map[int]struct{})
+	for _, s := range m {
+		lens[len(s)] = struct{}{}
+	}
+	return slices.Collect(maps.Keys(lens))
+}
+
+// subsliceAffinityKey looks up which node label (if any) selects a set of nodes
+// of size numHosts.
+func (t *TPUTopology) subsliceAffinityKey(numHosts int) (string, error) {
 	for name, nodes := range t.Hosts {
-		if len(nodes) == n {
-			klog.V(0).Infof("%d workers can use TPU host %q", n, name)
-			return gceTopologyHostLabel, true
+		if len(nodes) == numHosts {
+			klog.V(0).Infof("%d workers can use TPU host %q", numHosts, name)
+			return gceTopologyHostLabel, nil
 		}
 	}
 	for name, nodes := range t.Subblocks {
-		if len(nodes) == n {
-			klog.V(0).Infof("%d workers can use TPU subblock %q", n, name)
-			return gceTopologySubblockLabel, true
+		if len(nodes) == numHosts {
+			klog.V(0).Infof("%d workers can use TPU subblock %q", numHosts, name)
+			return gceTopologySubblockLabel, nil
 		}
 	}
 	for name, nodes := range t.Blocks {
-		if len(nodes) == n {
-			klog.V(0).Infof("%d workers can use TPU block %q", n, name)
-			return gceTopologyBlockLabel, true
+		if len(nodes) == numHosts {
+			klog.V(0).Infof("%d workers can use TPU block %q", numHosts, name)
+			return gceTopologyBlockLabel, nil
 		}
 	}
 	for name, nodes := range t.NodePools {
-		if len(nodes) == n {
-			klog.V(0).Infof("%d workers can use entire nodepool %q", n, name)
-			return "cloud.google.com/gke-nodepool", true
+		if len(nodes) == numHosts {
+			klog.V(0).Infof("%d workers can use entire nodepool %q", numHosts, name)
+			return "cloud.google.com/gke-nodepool", nil
 		}
 	}
-	return "", false
+	return "", fmt.Errorf("could not find affinity rule to schedule %d hosts", numHosts)
 }
 
 // startServer sets up and runs the webhook's HTTP server.
