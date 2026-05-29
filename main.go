@@ -1374,9 +1374,9 @@ func buildTPUTopology(nodes []*corev1.Node) *TPUTopology {
 func (t *TPUTopology) prettyPrint() {
 	klog.V(0).Info("TPU Topology:")
 	klog.V(0).Infof("Host      has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.Hosts))
-	klog.V(0).Infof("Subblocks has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.Subblocks))
-	klog.V(0).Infof("Blocks    has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.Blocks))
-	klog.V(0).Infof("NodePools has %d groups of sizes %v", len(t.Hosts), sliceLengths(t.NodePools))
+	klog.V(0).Infof("Subblocks has %d groups of sizes %v", len(t.Subblocks), sliceLengths(t.Subblocks))
+	klog.V(0).Infof("Blocks    has %d groups of sizes %v", len(t.Blocks), sliceLengths(t.Blocks))
+	klog.V(0).Infof("NodePools has %d groups of sizes %v", len(t.NodePools), sliceLengths(t.NodePools))
 }
 
 func sliceLengths[K comparable, T any](m map[K][]T) []int {
