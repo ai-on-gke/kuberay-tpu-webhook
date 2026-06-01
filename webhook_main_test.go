@@ -103,8 +103,8 @@ func getTestTPUWorker(clusterName string, groupName string, namespace string, ac
 				},
 			},
 			NodeSelector: map[string]string{
-				"cloud.google.com/gke-tpu-accelerator": accelerator,
-				"cloud.google.com/gke-tpu-topology":    topology,
+				gkeTPUAcceleratorLabel: accelerator,
+				tpuTopologyLabel:       topology,
 			},
 		},
 		Status: corev1.PodStatus{
@@ -253,8 +253,8 @@ func getTestTPUWorkerGroup(groupName string, numOfHosts int32, numReplicas int32
 					},
 				},
 				NodeSelector: map[string]string{
-					"cloud.google.com/gke-tpu-accelerator": accelerator,
-					"cloud.google.com/gke-tpu-topology":    topology,
+					gkeTPUAcceleratorLabel: accelerator,
+					tpuTopologyLabel:       topology,
 				},
 			},
 		},
@@ -336,8 +336,8 @@ func getTestRayCluster(clusterName string, groupName string, namespace string, n
 								},
 							},
 							NodeSelector: map[string]string{
-								"cloud.google.com/gke-tpu-accelerator": accelerator,
-								"cloud.google.com/gke-tpu-topology":    topology,
+								gkeTPUAcceleratorLabel: accelerator,
+								tpuTopologyLabel:       topology,
 							},
 						},
 					},
@@ -1192,7 +1192,7 @@ func Test_CheckWorkersMatchTopology_Subslice(t *testing.T) {
 	if workerGroupSpec.Template.Annotations == nil {
 		workerGroupSpec.Template.Annotations = make(map[string]string)
 	}
-	workerGroupSpec.Template.Annotations["cloud.google.com/gke-tpu-slice-topology"] = "2x4"
+	workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation] = "2x4"
 
 	// Should match because it prefers the 2x4 subslice annotation.
 	workersMatch, err := checkWorkersMatchTopology("test-cluster", "default", *workerGroupSpec)
@@ -1388,12 +1388,12 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-1",
 				Labels: map[string]string{
-					gkeNodePoolLabel:                       "tpu-pool",
-					gceTopologyBlockLabel:                  "block-1",
-					gceTopologySubblockLabel:               "subblock-1",
-					gceTopologyHostLabel:                   "host-1",
-					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
-					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					gkeNodePoolLabel:       "tpu-pool",
+					gceTopologyBlockLabel:  "block-1",
+					gceTopologySubblockLabel: "subblock-1",
+					gceTopologyHostLabel:   "host-1",
+					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
+					tpuTopologyLabel:       "2x2x1",
 					"tpu-type":                             "v4",
 				},
 			},
@@ -1402,12 +1402,12 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-2",
 				Labels: map[string]string{
-					gkeNodePoolLabel:                       "tpu-pool",
-					gceTopologyBlockLabel:                  "block-2",
-					gceTopologySubblockLabel:               "subblock-2",
-					gceTopologyHostLabel:                   "host-2",
-					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
-					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					gkeNodePoolLabel:       "tpu-pool",
+					gceTopologyBlockLabel:  "block-2",
+					gceTopologySubblockLabel: "subblock-2",
+					gceTopologyHostLabel:   "host-2",
+					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
+					tpuTopologyLabel:       "2x2x1",
 					"tpu-type":                             "v4",
 				},
 			},
@@ -1416,12 +1416,12 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-3",
 				Labels: map[string]string{
-					gkeNodePoolLabel:                       "tpu-pool",
-					gceTopologyBlockLabel:                  "block-3",
-					gceTopologySubblockLabel:               "subblock-3",
-					gceTopologyHostLabel:                   "host-3",
-					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
-					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					gkeNodePoolLabel:       "tpu-pool",
+					gceTopologyBlockLabel:  "block-3",
+					gceTopologySubblockLabel: "subblock-3",
+					gceTopologyHostLabel:   "host-3",
+					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
+					tpuTopologyLabel:       "2x2x1",
 					"tpu-type":                             "v4",
 				},
 			},
@@ -1432,7 +1432,7 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 	// 2x2x1 = 4 chips. With 2 chips per host, expectedHosts = 2.
 	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
-		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+		tpuSubsliceTopologyAnnotation: "2x2x1",
 	}
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector["tpu-type"] = "v4"
 
@@ -1454,10 +1454,10 @@ func Test_ValidateRayCluster_SubsliceZeroNodesWarning(t *testing.T) {
 	// RayCluster requesting 2 hosts in subslice, targeting nodes in a nodepool
 	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
-		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+		tpuSubsliceTopologyAnnotation: "2x2x1",
 	}
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
-		"cloud.google.com/gke-nodepool": "empty-tpu-pool",
+		gkeNodePoolLabel: "empty-tpu-pool",
 	}
 
 	// No nodes are provisioned yet (scaled to 0)
@@ -1484,10 +1484,10 @@ func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-1",
 				Labels: map[string]string{
-					gkeNodePoolLabel:                       "tpu-pool",
-					gceTopologyHostLabel:                   "host-1",
-					"cloud.google.com/gke-tpu-accelerator": "tpu-v4-podslice",
-					"cloud.google.com/gke-tpu-topology":    "2x2x1",
+					gkeNodePoolLabel:       "tpu-pool",
+					gceTopologyHostLabel:   "host-1",
+					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
+					tpuTopologyLabel:       "2x2x1",
 					"tpu-type":                             "v4",
 				},
 			},
@@ -1499,7 +1499,7 @@ func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
 	// Group 2: requests 4 hosts, but topology nodeSelector does not match (fails workersMatchTopology check)
 	rayCluster := getTestRayCluster("test-cluster", "tpu-group-1", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
-		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+		tpuSubsliceTopologyAnnotation: "2x2x1",
 	}
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector["tpu-type"] = "v4"
 
@@ -1530,10 +1530,10 @@ func Test_ValidateRayCluster_SubsliceSingleHostExitsEarly(t *testing.T) {
 	// even if the targeted nodepool has zero nodes.
 	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 1, 1, "4", "tpu-v4-podslice", "2x2x1", false)
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
-		"cloud.google.com/gke-tpu-slice-topology": "2x2x1",
+		tpuSubsliceTopologyAnnotation: "2x2x1",
 	}
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
-		"cloud.google.com/gke-nodepool": "empty-tpu-pool",
+		gkeNodePoolLabel: "empty-tpu-pool",
 	}
 
 	// No nodes are provisioned (scaled to 0)
@@ -2009,7 +2009,7 @@ func Test_MutatePod_Subslice(t *testing.T) {
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
-	pod.Annotations["cloud.google.com/gke-tpu-slice-topology"] = "2x4"
+	pod.Annotations[tpuSubsliceTopologyAnnotation] = "2x4"
 
 	// set up admissionReview object
 	admissionReview := getTestAdmissionReview("Pod", "CREATE")

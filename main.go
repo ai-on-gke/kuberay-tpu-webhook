@@ -84,15 +84,21 @@ const (
 	tpuResourceName    = corev1.ResourceName("google.com/tpu")
 	tpu7xType          = "tpu7x"
 
-	tpuTopologyLabel              = "cloud.google.com/gke-tpu-topology"
-	tpuSubsliceTopologyAnnotation = "cloud.google.com/gke-tpu-slice-topology"
+	// GKE label prefix.
+	gkeLabelPrefix = "cloud.google.com/"
+
+	tpuTopologyLabel              = gkeLabelPrefix + "gke-tpu-topology"
+	tpuSubsliceTopologyAnnotation = gkeLabelPrefix + "gke-tpu-slice-topology"
 	legacyReplicaIndexLabelKey    = "replicaIndex"
 
-	// Topology labels
-	gkeNodePoolLabel         = "cloud.google.com/gke-nodepool"
-	gceTopologyBlockLabel    = "cloud.google.com/gce-topology-block"
-	gceTopologySubblockLabel = "cloud.google.com/gce-topology-subblock"
-	gceTopologyHostLabel     = "cloud.google.com/gce-topology-host"
+	// GKE labels.
+	gkeTPUAcceleratorLabel = gkeLabelPrefix + "gke-tpu-accelerator"
+	gkeNodePoolLabel       = gkeLabelPrefix + "gke-nodepool"
+
+	// Topology labels.
+	gceTopologyBlockLabel    = gkeLabelPrefix + "gce-topology-block"
+	gceTopologySubblockLabel = gkeLabelPrefix + "gce-topology-subblock"
+	gceTopologyHostLabel     = gkeLabelPrefix + "gce-topology-host"
 )
 
 var (
@@ -366,12 +372,12 @@ func makeLabelSelectorRequirement(key string, op metav1.LabelSelectorOperator, v
 func getGKETopologyKey(pod *corev1.Pod) string {
 	if pod.Spec.Affinity != nil && pod.Spec.Affinity.PodAffinity != nil {
 		for _, term := range pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
-			if strings.HasPrefix(term.TopologyKey, "cloud.google.com/") {
+			if strings.HasPrefix(term.TopologyKey, gkeLabelPrefix) {
 				return term.TopologyKey
 			}
 		}
 	}
-	return "cloud.google.com/gke-nodepool"
+	return gkeNodePoolLabel
 }
 
 // injectAffinity injects pod affinity and anti-affinity scheduling constraints using replicaIndex and cluster labels
@@ -635,7 +641,7 @@ func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroup
 	// result in the same topologyKey. Log this mapping for
 	// debuggability.
 	parentTopology := workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
-	tpuType := workerGroupSpec.Template.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]
+	tpuType := workerGroupSpec.Template.Spec.NodeSelector[gkeTPUAcceleratorLabel]
 	klog.V(0).Infof("subslice (type=%q, parent=%q, slice=%q) -> %q", tpuType, parentTopology, desiredSubslice, topologyKey)
 
 	return "", nil, nil
@@ -880,7 +886,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 	// Detect v7x TPU accelerator
 	isV7x := false
-	if selector, ok := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-accelerator"]; ok && strings.HasPrefix(selector, tpu7xType) {
+	if selector, ok := pod.Spec.NodeSelector[gkeTPUAcceleratorLabel]; ok && strings.HasPrefix(selector, tpu7xType) {
 		isV7x = true
 	}
 
@@ -1412,7 +1418,7 @@ func (t *TPUTopology) subsliceAffinityKey(numHosts int) (string, error) {
 	for name, nodes := range t.NodePools {
 		if len(nodes) == numHosts {
 			klog.V(0).Infof("%d workers can use entire nodepool %q", numHosts, name)
-			return "cloud.google.com/gke-nodepool", nil
+			return gkeNodePoolLabel, nil
 		}
 	}
 	return "", fmt.Errorf("could not find affinity rule to schedule %d hosts", numHosts)
@@ -1481,7 +1487,7 @@ func main() {
 
 	// instantiate NodeInformer for TPU nodes in the GKE cluster
 	tweakNodeListOptionsFunc := func(options *metav1.ListOptions) {
-		options.LabelSelector = "cloud.google.com/gke-tpu-accelerator"
+		options.LabelSelector = gkeTPUAcceleratorLabel
 	}
 	nodeFactory := informers.NewFilteredSharedInformerFactory(client, 1*time.Minute, metav1.NamespaceAll, tweakNodeListOptionsFunc)
 	nodeInformer := nodeFactory.Core().V1().Nodes().Informer()
