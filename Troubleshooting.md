@@ -55,3 +55,11 @@ workerGroupSpecs:
           requests:
             google.com/tpu: "{$TPU_CHIPS_PER_WORKER}"
 ```
+
+## When subslicing, the number of pods are equal to the number of nodes, but some are stuck pending
+
+### Solution #1
+
+The valid, schedulable subslices may be fragmented by the smallest subslices.
+
+Create the subsliced RayClusters in order of largest subslice to smallest to effectively bin-pack the nodes. If they are already created, you may delete the pods to trigger re-creation.
