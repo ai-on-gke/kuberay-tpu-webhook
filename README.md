@@ -83,7 +83,7 @@ The webhook evaluates each `workerGroupSpec` against the following rules:
     * **Expected Hosts:** `max(Total Chips / Chips Per Host, 1)`
     * If the calculated `Expected Hosts` does not exactly match the `numOfHosts` defined in your `workerGroupSpec`, the cluster is rejected with the error: `"Number of workers in worker group not equal to specified topology"`.
   * **Example:** If your node selector specifies a `2x2x2` topology (8 total chips) and your container requests `4` TPUs (`google.com/tpu: "4"`), your `numOfHosts` must be set to `2`.
-* **Subslice Ambiguity Validation:** If a subslice is requested via the `cloud.google.com/gke-tpu-slice-topology` annotation, the webhook verifies that the requested `numOfHosts` corresponds to a unique physical grouping (block, subblock, etc.) available in the targeted nodes. If the request is ambiguous or no grouping matches the host count, the cluster is rejected.
+* **Subslice Ambiguity Validation:** If a subslice is requested via the `cloud.google.com/gke-tpu-slice-topology` annotation, the webhook verifies that the requested `numOfHosts` corresponds to a unique physical grouping (block, subblock, etc.) available in the targeted nodes. If the request is ambiguous or no grouping matches the host count, the cluster is rejected. Note that if there are no existing nodes in the targeted nodepool (such as during scale-up on GKE Autopilot), the RayCluster will be admitted with a warning to allow auto-provisioning/scale-up to trigger, but subslice scheduling and co-location guarantees will not work because the webhook cannot discover the node topology; in this case, the RayCluster must be re-created after the nodes are provisioned.
 
 ## Install the KubeRay TPU Webhook from Source
 
