@@ -394,6 +394,10 @@ func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, num
 			topology := buildTPUTopology(nodes)
 			if key, err := topology.subsliceAffinityKey(numOfHosts); err == nil {
 				topologyKey = key
+			} else {
+				// If no topologyKey could be identified despite nodes being
+				// available, the pod should be rejected with an error.
+				return fmt.Errorf("schedule pod for subslice on %d possible nodes not possible: %w", len(nodes), err)
 			}
 		} else if err != nil {
 			klog.V(0).ErrorS(err, "Cannot choose subslice affinity key, list nodes returned err")
