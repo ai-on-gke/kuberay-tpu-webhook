@@ -8,7 +8,7 @@ spec:
       spec:
         containers:
         - name: ray-head
-          image: rayproject/ray:2.55.0
+          image: rayproject/ray:2.55.0-tpu
           resources:
             requests:
               cpu: "1"
@@ -24,14 +24,14 @@ spec:
       spec:
         containers:
         - name: ray-worker-0
-          image: rayproject/ray:2.55.0
+          image: rayproject/ray:2.55.0-tpu
           resources:
             requests:
               google.com/tpu: "2"
             limits:
               google.com/tpu: "2"
         - name: ray-worker-1
-          image: rayproject/ray:2.55.0
+          image: rayproject/ray:2.55.0-tpu
           resources:
             requests:
               google.com/tpu: "2"
