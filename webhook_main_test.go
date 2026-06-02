@@ -2054,6 +2054,49 @@ func Test_MutatePod_Subslice(t *testing.T) {
 	assert.True(t, foundHostnames, "TPU_WORKER_HOSTNAMES patch not found")
 }
 
+func Test_MutatePod_Subslice_Error(t *testing.T) {
+	// Pod with 4x4 topology in nodeSelector, but 2x4 in subslice annotation.
+	// 2x4 with 4 chips per host = 8 chips total / 4 chips per host = 2 hosts.
+	pod := getTestTPUWorker("test-cluster", "tpu-group", "default", "tpu-v6e-slice", "4x4", "4")
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[tpuSubsliceTopologyAnnotation] = "2x4"
+
+	// set up admissionReview object
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	// Mock nodes: only 1 node, so requesting 2 hosts in subslice cannot match and will fail.
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-1",
+				Labels: map[string]string{
+					gkeNodePoolLabel:         "tpu-pool",
+					gceTopologyBlockLabel:    "block-1",
+					gceTopologySubblockLabel: "subblock-1",
+					gceTopologyHostLabel:     "host-1",
+					gkeTPUAcceleratorLabel:   "tpu-v6e-slice",
+					tpuTopologyLabel:         "4x4",
+				},
+			},
+		},
+	}
+
+	testPodLister := setupInformer()
+	nodeLister := setupNodeInformer(nodes...)
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, nodeLister)
+
+	// mutatePod should return an error since nodes exist but a subslice topologyKey could not be identified
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.Error(t, err)
+	assert.Nil(t, admissionResponse)
+	assert.Contains(t, err.Error(), "schedule pod for subslice on 1 possible nodes not possible")
+}
+
 func Test_GenerateHeadlessServiceName(t *testing.T) {
 	tests := map[string]struct {
 		testRayClusterName  string
