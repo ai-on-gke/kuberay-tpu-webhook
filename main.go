@@ -622,8 +622,19 @@ func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroup
 		// Single-host workers can run anywhere.
 		return "", nil, nil
 	}
-	selector := labels.SelectorFromSet(workerGroupSpec.Template.Spec.NodeSelector)
 
+	parentTopology := workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
+	tpuType := workerGroupSpec.Template.Spec.NodeSelector[gkeTPUAcceleratorLabel]
+
+	if parentTopology == "" {
+		return "", fmt.Errorf("must specify parent topology %q in nodeSelector when using subslice annotation", tpuTopologyLabel), nil
+	}
+
+	if !sliceIsSubset(parentTopology, desiredSubslice) {
+		return "", fmt.Errorf("subslice %q is not smaller than parent %q", desiredSubslice, parentTopology), nil
+	}
+
+	selector := labels.SelectorFromSet(workerGroupSpec.Template.Spec.NodeSelector)
 	nodes, err := t.nodeLister.List(selector)
 	if err != nil {
 		return "", nil, err
@@ -644,11 +655,30 @@ func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroup
 	// The mapping of TPU type, slice, and subslice should always
 	// result in the same topologyKey. Log this mapping for
 	// debuggability.
-	parentTopology := workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
-	tpuType := workerGroupSpec.Template.Spec.NodeSelector[gkeTPUAcceleratorLabel]
 	klog.V(0).Infof("subslice (type=%q, parent=%q, slice=%q) -> %q", tpuType, parentTopology, desiredSubslice, topologyKey)
 
 	return "", nil, nil
+}
+
+// sliceIsSubset returns true if the parent slice is dimensionally at least as
+// big as the child, i.e. the child square or cube fits within the parent.
+func sliceIsSubset(parent, child string) bool {
+	parentDims := strings.Split(parent, "x")
+	childDims := strings.Split(child, "x")
+	if len(parentDims) != len(childDims) {
+		return false
+	}
+	for i := range len(parentDims) {
+		parentVal, err1 := strconv.Atoi(parentDims[i])
+		childVal, err2 := strconv.Atoi(childDims[i])
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		if childVal > parentVal {
+			return false
+		}
+	}
+	return true
 }
 
 // getEnvironmentVariable returns value associated with a given Container environment variable and if it exists

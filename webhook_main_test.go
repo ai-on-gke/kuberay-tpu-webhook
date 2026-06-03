@@ -1458,6 +1458,7 @@ func Test_ValidateRayCluster_SubsliceZeroNodesWarning(t *testing.T) {
 	}
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
 		gkeNodePoolLabel: "empty-tpu-pool",
+		tpuTopologyLabel: "2x2x2",
 	}
 
 	// No nodes are provisioned yet (scaled to 0)
@@ -1475,6 +1476,32 @@ func Test_ValidateRayCluster_SubsliceZeroNodesWarning(t *testing.T) {
 	assert.Equal(t, "Success", resp.Result.Status)
 	assert.Len(t, resp.Warnings, 1)
 	assert.Contains(t, resp.Warnings[0], "targets zero nodes (cannot discover subslice affinity) and will need to be re-created after nodes are provisioned.")
+}
+
+func Test_ValidateRayCluster_SubsliceMissingParentTopology(t *testing.T) {
+	// RayCluster requesting 2 hosts in subslice, but missing cloud.google.com/gke-tpu-topology in nodeSelector
+	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 2, 1, "2", "tpu-v4-podslice", "2x2x1", false)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		tpuSubsliceTopologyAnnotation: "2x2x1",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
+		gkeNodePoolLabel: "empty-tpu-pool",
+		// missing tpuTopologyLabel
+	}
+
+	nodeLister := setupNodeInformer()
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.False(t, resp.Allowed)
+	assert.Equal(t, "Failure", resp.Result.Status)
+	assert.Contains(t, resp.Result.Message, "must specify parent topology")
 }
 
 func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
@@ -2671,4 +2698,56 @@ func applyPatches(t *testing.T, pod *corev1.Pod, patchBytes []byte) *corev1.Pod 
 		}
 	}
 	return patchedPod
+}
+
+func TestSliceIsSubset(t *testing.T) {
+	table := []struct {
+		name   string
+		parent string
+		child  string
+		want   bool
+	}{
+		{
+			name:   "equal slices",
+			parent: "2x2x4",
+			child:  "2x2x4",
+			want:   true,
+		},
+		{
+			name:   "smaller subset",
+			parent: "2x2x4",
+			child:  "2x2x2",
+			want:   true,
+		},
+		{
+			name:   "larger child dimension",
+			parent: "2x2x4",
+			child:  "2x2x8",
+			want:   false,
+		},
+		{
+			name:   "different dimension count",
+			parent: "2x2",
+			child:  "2x2x2",
+			want:   false,
+		},
+		{
+			name:   "string comparison bug check - subslice larger",
+			parent: "4x4",
+			child:  "2x16",
+			want:   false,
+		},
+		{
+			name:   "string comparison bug check - subslice smaller",
+			parent: "1x10",
+			child:  "1x2",
+			want:   true,
+		},
+	}
+	for _, tc := range table {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sliceIsSubset(tc.parent, tc.child)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
