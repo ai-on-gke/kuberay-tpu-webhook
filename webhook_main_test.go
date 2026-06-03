@@ -1388,13 +1388,13 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-1",
 				Labels: map[string]string{
-					gkeNodePoolLabel:       "tpu-pool",
-					gceTopologyBlockLabel:  "block-1",
+					gkeNodePoolLabel:         "tpu-pool",
+					gceTopologyBlockLabel:    "block-1",
 					gceTopologySubblockLabel: "subblock-1",
-					gceTopologyHostLabel:   "host-1",
-					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
-					tpuTopologyLabel:       "2x2x1",
-					"tpu-type":                             "v4",
+					gceTopologyHostLabel:     "host-1",
+					gkeTPUAcceleratorLabel:   "tpu-v4-podslice",
+					tpuTopologyLabel:         "2x2x1",
+					"tpu-type":               "v4",
 				},
 			},
 		},
@@ -1402,13 +1402,13 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-2",
 				Labels: map[string]string{
-					gkeNodePoolLabel:       "tpu-pool",
-					gceTopologyBlockLabel:  "block-2",
+					gkeNodePoolLabel:         "tpu-pool",
+					gceTopologyBlockLabel:    "block-2",
 					gceTopologySubblockLabel: "subblock-2",
-					gceTopologyHostLabel:   "host-2",
-					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
-					tpuTopologyLabel:       "2x2x1",
-					"tpu-type":                             "v4",
+					gceTopologyHostLabel:     "host-2",
+					gkeTPUAcceleratorLabel:   "tpu-v4-podslice",
+					tpuTopologyLabel:         "2x2x1",
+					"tpu-type":               "v4",
 				},
 			},
 		},
@@ -1416,13 +1416,13 @@ func Test_ValidateRayCluster_AmbiguousSubslice(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "node-3",
 				Labels: map[string]string{
-					gkeNodePoolLabel:       "tpu-pool",
-					gceTopologyBlockLabel:  "block-3",
+					gkeNodePoolLabel:         "tpu-pool",
+					gceTopologyBlockLabel:    "block-3",
 					gceTopologySubblockLabel: "subblock-3",
-					gceTopologyHostLabel:   "host-3",
-					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
-					tpuTopologyLabel:       "2x2x1",
-					"tpu-type":                             "v4",
+					gceTopologyHostLabel:     "host-3",
+					gkeTPUAcceleratorLabel:   "tpu-v4-podslice",
+					tpuTopologyLabel:         "2x2x1",
+					"tpu-type":               "v4",
 				},
 			},
 		},
@@ -1504,6 +1504,46 @@ func Test_ValidateRayCluster_SubsliceMissingParentTopology(t *testing.T) {
 	assert.Contains(t, resp.Result.Message, "must specify parent topology")
 }
 
+func Test_ValidateRayCluster_SubsliceMissingTopologyInfo(t *testing.T) {
+	// RayCluster requesting 2 hosts in subslice, targeting nodes in a nodepool that do not have topology labels.
+	rayCluster := getTestRayCluster("test-cluster", "tpu-group", "default", 2, 1, "2", "tpu7x", "2x2x1", false)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		tpuSubsliceTopologyAnnotation: "2x2x1",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
+		gkeNodePoolLabel:       "tpu-pool",
+		tpuTopologyLabel:       "2x2x2",
+		gkeTPUAcceleratorLabel: "tpu7x",
+	}
+
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-1",
+				Labels: map[string]string{
+					gkeNodePoolLabel:       "tpu-pool",
+					tpuTopologyLabel:       "2x2x2",
+					gkeTPUAcceleratorLabel: "tpu7x",
+				},
+			},
+		},
+	}
+
+	nodeLister := setupNodeInformer(nodes...)
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.False(t, resp.Allowed)
+	assert.Equal(t, "Failure", resp.Result.Status)
+	assert.Contains(t, resp.Result.Message, "cannot subslice TPU type \"tpu7x\" without Dynamic Slicing")
+}
+
 func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
 	// Mock nodes: only single hosts of size 1, so requesting 2 hosts is ambiguous/fails
 	nodes := []*corev1.Node{
@@ -1515,7 +1555,7 @@ func Test_ValidateRayCluster_SubsliceFailureHaltsImmediately(t *testing.T) {
 					gceTopologyHostLabel:   "host-1",
 					gkeTPUAcceleratorLabel: "tpu-v4-podslice",
 					tpuTopologyLabel:       "2x2x1",
-					"tpu-type":                             "v4",
+					"tpu-type":             "v4",
 				},
 			},
 		},

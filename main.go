@@ -624,8 +624,6 @@ func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroup
 	}
 
 	parentTopology := workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
-	tpuType := workerGroupSpec.Template.Spec.NodeSelector[gkeTPUAcceleratorLabel]
-
 	if parentTopology == "" {
 		return "", fmt.Errorf("must specify parent topology %q in nodeSelector when using subslice annotation", tpuTopologyLabel), nil
 	}
@@ -645,7 +643,11 @@ func (t *TPUWebhookServer) checkSubsliceAffinity(workerGroupSpec ray.WorkerGroup
 		return warning, nil, nil
 	}
 
+	tpuType := workerGroupSpec.Template.Spec.NodeSelector[gkeTPUAcceleratorLabel]
 	topology := buildTPUTopology(nodes)
+	if topology.missingTopologyInfo() {
+		return "", fmt.Errorf("cannot subslice TPU type %q without Dynamic Slicing (https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dynamic-slicing)", tpuType), nil
+	}
 	topology.prettyPrint()
 	topologyKey, err := topology.subsliceAffinityKey(numHosts)
 	if err != nil {
@@ -1409,6 +1411,12 @@ func buildTPUTopology(nodes []*corev1.Node) *TPUTopology {
 		}
 	}
 	return t
+}
+
+// missingTopologyInfo returns true if the topology struct has nodes in a
+// nodepool, but none can be indexed by GCE topology label.
+func (t *TPUTopology) missingTopologyInfo() bool {
+	return len(t.NodePools) > 0 && len(t.Hosts) == 0 && len(t.Subblocks) == 0 && len(t.Blocks) == 0
 }
 
 // prettyPrint logs the sizes of the node label select-able TPU groups.
