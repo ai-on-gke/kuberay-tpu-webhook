@@ -476,6 +476,21 @@ func Test_GetReplicaIndex(t *testing.T) {
 			},
 			expectedReplicaIndex: 1,
 		},
+		"multi-slice gap filling - ignore other group": {
+			// should assign Pod to replica 1 if 0 and 2 exist but 1 is missing
+			sliceToTPUHosts: map[slice][]int{
+				slice{"test-cluster", "other-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
+				slice{"test-cluster", "test-group", "test-namespace", 2, int32(4)}:  []int{0, 1, 2, 3},
+			},
+			expectedReplicaIndex: 0,
+		},
+		"multi-slice gap filling - prefer completing slice": {
+			// should assign Pod to replica 1 to complete the slice despite 0 missing
+			sliceToTPUHosts: map[slice][]int{
+				slice{"test-cluster", "test-group", "test-namespace", 1, int32(2)}: []int{0},
+			},
+			expectedReplicaIndex: 1,
+		},
 	}
 
 	// validate getReplicaIndex() returns the expected Replica ID for TPU pods in varying pod slices

@@ -716,7 +716,7 @@ func getReplicaIndex(sliceToTPUHosts map[slice][]int, clusterName string, groupN
 		return 0
 	}
 	nextLowestId := math.MaxInt32
-	existingIndices := make(map[int]bool)
+	existingIndices := make(map[int]bool, len(sliceToTPUHosts))
 	for slice, workerList := range sliceToTPUHosts {
 		if slice.clusterName == clusterName && slice.groupName == groupName && slice.namespace == namespace {
 			existingIndices[slice.replicaIndex] = true
@@ -728,9 +728,15 @@ func getReplicaIndex(sliceToTPUHosts map[slice][]int, clusterName string, groupN
 			}
 		}
 	}
-	// first pod of new slice in cluster
+	// If no ID was found, this is either the first pod of a new slice in the
+	// cluster. The new slice should either be added to the end (one plus the
+	// last observed slice) or slot into an existing gap (e.g. a previous slice
+	// was preempted).
 	if nextLowestId == math.MaxInt32 {
-		for i := 0; ; i++ {
+		// The maximum ID that can be assigned is one past the highest observed.
+		// Range over these possible IDs in order; inclusive of the last.
+		maxId := slices.Max(slices.Collect(maps.Keys(existingIndices))) + 1
+		for i := range maxId + 1 {
 			if !existingIndices[i] {
 				nextLowestId = i
 				break
