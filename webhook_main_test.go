@@ -453,13 +453,28 @@ func Test_GetReplicaIndex(t *testing.T) {
 			expectedReplicaIndex: 1,
 		},
 		"multi-slice worker group": {
-			// should assign Pod to replica 4 since 3 existing slices with all workers created
+			// should assign Pod to replica 3 since 3 existing slices with all workers created
 			sliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 2, 3},
 				slice{"test-cluster", "test-group", "test-namespace", 2, int32(4)}: []int{0, 1, 2, 3},
 			},
 			expectedReplicaIndex: 3,
+		},
+		"multi-slice gap filling - lower index missing": {
+			// should assign Pod to replica 0 even if replica 1 exists, if 0 is missing
+			sliceToTPUHosts: map[slice][]int{
+				slice{"test-cluster", "test-group", "test-namespace", 1, int32(4)}: []int{0, 1, 2, 3},
+			},
+			expectedReplicaIndex: 0,
+		},
+		"multi-slice gap filling - middle index missing": {
+			// should assign Pod to replica 1 if 0 and 2 exist but 1 is missing
+			sliceToTPUHosts: map[slice][]int{
+				slice{"test-cluster", "test-group", "test-namespace", 0, int32(4)}: []int{0, 1, 2, 3},
+				slice{"test-cluster", "test-group", "test-namespace", 2, int32(4)}: []int{0, 1, 2, 3},
+			},
+			expectedReplicaIndex: 1,
 		},
 	}
 
