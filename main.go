@@ -728,10 +728,10 @@ func getReplicaIndex(sliceToTPUHosts map[slice][]int, clusterName string, groupN
 			}
 		}
 	}
-	// If no ID was found, this is either the first pod of a new slice in the
-	// cluster. The new slice should either be added to the end (one plus the
-	// last observed slice) or slot into an existing gap (e.g. a previous slice
-	// was preempted).
+	// If no ID was found, this is the first pod of a new slice in the cluster,
+	// which should either be added to the end (one plus the last observed
+	// slice) or slot into an existing gap (e.g. a previous slice was
+	// preempted).
 	if nextLowestId == math.MaxInt32 {
 		// The maximum ID that can be assigned is one past the highest observed.
 		// Range over these possible IDs in order; inclusive of the last.
