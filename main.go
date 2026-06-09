@@ -733,10 +733,9 @@ func getReplicaIndex(sliceToTPUHosts map[slice][]int, clusterName string, groupN
 	// slice) or slot into an existing gap (e.g. a previous slice was
 	// preempted).
 	if nextLowestId == math.MaxInt32 {
-		// The maximum ID that can be assigned is one past the highest observed.
-		// Range over these possible IDs in order; inclusive of the last.
-		maxId := slices.Max(slices.Collect(maps.Keys(existingIndices))) + 1
-		for i := range maxId + 1 {
+		// By the pigeonhole principle, there must be at least one missing
+		// replica index in the range [0, len(existingIndices)].
+		for i := range len(existingIndices) + 1 {
 			if !existingIndices[i] {
 				nextLowestId = i
 				break

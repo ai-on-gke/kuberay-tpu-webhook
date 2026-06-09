@@ -491,6 +491,12 @@ func Test_GetReplicaIndex(t *testing.T) {
 			},
 			expectedReplicaIndex: 1,
 		},
+		"multi-slice gap filling - no panic on empty with >1 sliceToTPUHosts": {
+			sliceToTPUHosts: map[slice][]int{
+				slice{"test-cluster", "other-group", "test-namespace", 1, int32(2)}: []int{0},
+			},
+			expectedReplicaIndex: 0,
+		},
 	}
 
 	// validate getReplicaIndex() returns the expected Replica ID for TPU pods in varying pod slices
