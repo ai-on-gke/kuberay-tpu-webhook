@@ -21,7 +21,9 @@ row's KubeRay version.
 
 | KubeRay version | Webhook version | TPU Generation |
 |-----------------|-----------------|-------|
-| 1.4.0           | 1.3.1           | Added Ironwood (TPU v7x) support for all configurations (multi-slice, multi-host, etc). |
+| 1.6.0           | 1.4.0           | Supports TPU versions v4, v5, v6 and v7 |
+| 1.5.0           | 1.3.1           | Supports TPU versions v4, v5, v6 and v7 |
+| 1.4.0           | 1.3.1           | Supports TPU versions v4, v5, v6 and v7 |
 | 1.4.0           | 1.2.5           | Supports TPU versions v4 to v6e. |
 | 1.1.1           | 1.2.4           | Supports TPU versions v4 to v6e. |
 
