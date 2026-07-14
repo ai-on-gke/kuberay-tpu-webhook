@@ -1,6 +1,6 @@
 apiVersion: v2
 name: kuberay-tpu-webhook
-description: Helm chart for deploying the KubeRay TPU Webhook 
+description: Helm chart for deploying the KubeRay TPU Webhook
 type: application
 
 # This is the chart version. This version number should be incremented each time you make changes

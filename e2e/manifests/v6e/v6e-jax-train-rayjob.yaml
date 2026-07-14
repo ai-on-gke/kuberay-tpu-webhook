@@ -1,0 +1,53 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: v6e-jax-train-rayjob
+spec:
+  entrypoint: python /app/jax_trainer.py
+  runtimeEnvYAML: |
+    env_vars:
+      ACCELERATOR_TYPE: "TPU-V6E"
+      TOPOLOGY: "4x4"
+      NUM_WORKERS: "4"
+      RESOURCES_PER_WORKER: "4"
+  rayClusterSpec:
+
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: rayproject/ray:nightly-tpu
+            volumeMounts:
+            - name: script-vol
+              mountPath: /app
+            resources:
+              requests:
+                cpu: "1"
+              limits:
+                cpu: "1"
+          volumes:
+          - name: script-vol
+            configMap:
+              name: rayjob-script
+    workerGroupSpecs:
+    - replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      groupName: tpu-worker-group
+      numOfHosts: 4
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+          - name: ray-worker
+            image: rayproject/ray:nightly-tpu
+            resources:
+              requests:
+                google.com/tpu: "4"
+              limits:
+                google.com/tpu: "4"
+          nodeSelector:
+            cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+            cloud.google.com/gke-tpu-topology: 4x4

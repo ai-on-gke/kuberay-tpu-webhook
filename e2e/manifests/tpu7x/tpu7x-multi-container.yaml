@@ -1,14 +1,14 @@
 apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
-  name: tpu-v7x-multi-host
+  name: tpu-7x-multi-container
 spec:
   headGroupSpec:
     template:
       spec:
         containers:
         - name: ray-head
-          image: rayproject/ray:nightly-tpu
+          image: rayproject/ray:nightly-py312-tpu
           resources:
             requests:
               cpu: "1"
@@ -19,17 +19,24 @@ spec:
     minReplicas: 1
     maxReplicas: 1
     groupName: tpu-worker-group
-    numOfHosts: 2
+    numOfHosts: 1
     template:
       spec:
         containers:
-        - name: ray-worker
-          image: rayproject/ray:nightly-tpu
+        - name: ray-worker-0
+          image: rayproject/ray:nightly-py312-tpu
           resources:
             requests:
-              google.com/tpu: "4"
+              google.com/tpu: "2"
             limits:
-              google.com/tpu: "4"
+              google.com/tpu: "2"
+        - name: ray-worker-1
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              google.com/tpu: "2"
+            limits:
+              google.com/tpu: "2"
         nodeSelector:
           cloud.google.com/gke-tpu-accelerator: tpu7x
-          cloud.google.com/gke-tpu-topology: 2x2x2
+          cloud.google.com/gke-tpu-topology: 2x2x1

@@ -5,7 +5,7 @@ tpuWebhook:
   namespace:
     name: ray-system
     labels: {}
-  
+
   image:
     repository: us-docker.pkg.dev/ai-on-gke/kuberay-tpu-webhook/tpu-webhook
     tag: v1.4.0-gke.0
@@ -27,7 +27,7 @@ tpuWebhook:
       seccompProfile:
         type: RuntimeDefault
     podSecurityContext: {}
-  
+
   service:
     type: ClusterIP
     port: 443

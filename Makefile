@@ -20,9 +20,14 @@ webhook:
 run: webhook
 	go run ./main.go
 
-# Run go fmt against code.
+# Run formatting against code.
 fmt:
 	go fmt ./...
+	@if command -v pre-commit >/dev/null 2>&1; then \
+		pre-commit run --all-files; \
+	else \
+		echo "Warning: pre-commit not found. Skipping python formatting."; \
+	fi
 
 # Run go vet against code.
 vet:
@@ -63,4 +68,3 @@ img-swap:
 	EDITOR="sed -i \"s|^\( \+\)image: .*$$|\1image: ${IMG}|\"" kubectl edit deployment -n ray-system kuberay-tpu-webhook
 
 .PHONY: webhook run fmt vet test e2e deploy uninstall docker-build docker-push deploy-cert uninstall-cert img-swap
-

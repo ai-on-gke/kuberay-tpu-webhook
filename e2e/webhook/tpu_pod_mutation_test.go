@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/util/retry"
 )
 
 var (
@@ -61,6 +62,7 @@ const (
 
 	// Ray-specific labels.
 	rayNodeTypeWorker   = string(rayv1.WorkerNode)
+	rayNodeTypeHead     = string(rayv1.HeadNode)
 )
 
 func init() {
@@ -469,7 +471,7 @@ func TestWebhookMutation_HeterogeneousCluster(t *testing.T) {
 }
 
 func TestWebhookMutation_V7xSingleHost(t *testing.T) {
-	rayCluster := loadManifest(t, "../manifests/v7x/v7x-8-single-host.yaml")
+	rayCluster := loadManifest(t, "../manifests/tpu7x/tpu7x-8-single-host.yaml")
 
 	labelSelector := getLabelSelector(t, rayCluster.Name)
 
@@ -488,7 +490,7 @@ func TestWebhookMutation_V7xSingleHost(t *testing.T) {
 }
 
 func TestWebhookMutation_V7xMultiHost(t *testing.T) {
-	rayCluster := loadManifest(t, "../manifests/v7x/v7x-16-multi-host.yaml")
+	rayCluster := loadManifest(t, "../manifests/tpu7x/tpu7x-16-multi-host.yaml")
 
 	labelSelector := getLabelSelector(t, rayCluster.Name)
 
@@ -612,7 +614,7 @@ func buildExpectedProcessAddresses(numOfHosts int, replicaIndexLabelVal string, 
 }
 
 func TestWebhookMutation_V7xMultiContainer(t *testing.T) {
-	rayCluster := loadManifest(t, "../manifests/v7x/v7x-multi-container.yaml")
+	rayCluster := loadManifest(t, "../manifests/tpu7x/tpu7x-multi-container.yaml")
 
 	labelSelector := fmt.Sprintf("%s=%s", utils.RayClusterLabelKey, rayCluster.Name)
 	t.Logf("Looking for pods with selector: %s", labelSelector)
@@ -640,7 +642,7 @@ func TestWebhookMutation_V7xMultiContainer(t *testing.T) {
 }
 
 func TestWebhookMutation_V7xMultiSlice(t *testing.T) {
-	rayCluster := loadManifest(t, "../manifests/v7x/v7x-16-multi-slice.yaml")
+	rayCluster := loadManifest(t, "../manifests/tpu7x/tpu7x-16-multi-slice.yaml")
 
 	labelSelector := getLabelSelector(t, rayCluster.Name)
 
@@ -673,7 +675,7 @@ func TestWebhookMutation_V7xMultiSlice(t *testing.T) {
 	assert.Equal(t, 2, sliceIds["1"], "Expected 2 worker pods in slice 1")
 
 	assert.Equal(t, 1, len(coordinatorAddresses), "All containers in a multi-slice group should share the same coordinator address")
-	assert.True(t, coordinatorAddresses["tpu-worker-group-0-0.tpu-v7x-multi-slice-headless:8081"], "Unexpected coordinator address")
+	assert.True(t, coordinatorAddresses["tpu-worker-group-0-0.tpu-7x-multi-slice-headless:8081"], "Unexpected coordinator address")
 }
 
 func TestWebhookMutation_V6eDNSResolution(t *testing.T) {
@@ -699,7 +701,7 @@ func TestWebhookMutation_V6eDNSResolution(t *testing.T) {
 
 	// Wait for all worker pods to be in Running phase so DNS endpoints are fully registered
 	t.Log("Waiting for all worker pods to reach Running phase...")
-	err = wait.PollUntilContextTimeout(t.Context(), 3*time.Second, 120*time.Second, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextTimeout(t.Context(), 5*time.Second, 240*time.Second, true, func(ctx context.Context) (bool, error) {
 		currentPods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 		if err != nil {
 			return false, err
@@ -790,6 +792,64 @@ func execCommandInPod(t *testing.T, podName string, containerName string, cmd []
 	return stdout.String(), stderr.String(), err
 }
 
+func writeLocalFileToPod(t *testing.T, podName string, containerName string, localPath string, remotePath string) {
+	t.Helper()
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("Failed to read local file %s: %v", localPath, err)
+	}
+	t.Logf("Writing local file %s to %s in pod %s...", localPath, remotePath, podName)
+	cmd := []string{"bash", "-c", "cat << 'EOF' > " + remotePath + "\n" + string(content) + "\nEOF\n"}
+	stdout, stderr, err := execCommandInPod(t, podName, containerName, cmd)
+	if err != nil {
+		t.Fatalf("Failed to write file %s to pod: %v (stdout: %q, stderr: %q)", remotePath, err, stdout, stderr)
+	}
+}
+
+
+
+func waitForAllPodsRunning(t *testing.T, clusterName string, expectedWorkerCount int, timeout time.Duration) *corev1.Pod {
+	t.Helper()
+	t.Logf("Waiting for head pod and all %d worker pods of cluster %s to reach Running phase...", expectedWorkerCount, clusterName)
+	labelSelector := fmt.Sprintf("%s=%s", utils.RayClusterLabelKey, clusterName)
+	var headPod *corev1.Pod
+	err := wait.PollUntilContextTimeout(t.Context(), 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		pods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false, err
+		}
+
+		headRunning := false
+		workerRunningCount := 0
+		for _, p := range pods.Items {
+			if p.Labels[utils.RayNodeTypeLabelKey] == rayNodeTypeHead && p.Status.Phase == corev1.PodRunning {
+				headRunning = true
+				pCopy := p
+				headPod = &pCopy
+			} else if p.Labels[utils.RayNodeTypeLabelKey] == rayNodeTypeWorker {
+				if p.Status.Phase == corev1.PodRunning {
+					containerRunning := false
+					for _, cs := range p.Status.ContainerStatuses {
+						if cs.Name == p.Spec.Containers[0].Name && cs.State.Running != nil {
+							containerRunning = true
+							break
+						}
+					}
+					if containerRunning {
+						workerRunningCount++
+					}
+				}
+			}
+		}
+		t.Logf("Checking pod states... Head Running: %t, Workers Running: %d/%d", headRunning, workerRunningCount, expectedWorkerCount)
+		return headRunning && workerRunningCount == expectedWorkerCount, nil
+	})
+	if err != nil {
+		t.Fatalf("Pods of cluster %s failed to reach Running phase within %v: %v", clusterName, timeout, err)
+	}
+	return headPod
+}
+
 func triggerRayClusterReconcile(t *testing.T, clusterName string) {
 	t.Helper()
 	gvr := schema.GroupVersionResource{
@@ -797,19 +857,23 @@ func triggerRayClusterReconcile(t *testing.T, clusterName string) {
 		Version:  "v1",
 		Resource: "rayclusters",
 	}
-	cluster, err := dynamicClient.Resource(gvr).Namespace(testNamespace).Get(t.Context(), clusterName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("Failed to get RayCluster %s: %v", clusterName, err)
-	}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cluster, err := dynamicClient.Resource(gvr).Namespace(testNamespace).Get(t.Context(), clusterName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
 
-	annotations := cluster.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	annotations["tpu-webhook.gke.io/reconcile-trigger"] = fmt.Sprint(time.Now().UnixNano())
-	cluster.SetAnnotations(annotations)
+		annotations := cluster.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations["tpu-webhook.gke.io/reconcile-trigger"] = fmt.Sprint(time.Now().UnixNano())
+		cluster.SetAnnotations(annotations)
 
-	_, err = dynamicClient.Resource(gvr).Namespace(testNamespace).Update(t.Context(), cluster, metav1.UpdateOptions{})
+		_, err = dynamicClient.Resource(gvr).Namespace(testNamespace).Update(t.Context(), cluster, metav1.UpdateOptions{})
+		return err
+	})
+
 	if err != nil {
 		t.Fatalf("Failed to trigger reconciliation for RayCluster %s: %v", clusterName, err)
 	}
@@ -862,4 +926,25 @@ func waitForRecreatedPods(t *testing.T, labelSelector string, expectedCount int,
 		t.Fatalf("Timed out waiting for recreated pods: %v (found %d/%d)", err, len(recreatedPods), expectedCount)
 	}
 	return recreatedPods
+}
+
+func TestWebhookIntegration_RayTPUUtilsAndJAX(t *testing.T) {
+	clusterName := "tpu-v6e-integration"
+
+	// Wait for head pod and both TPU worker pods to reach Running phase
+	headPod := waitForAllPodsRunning(t, clusterName, 2, 240*time.Second)
+
+	// Write utility verification script into the head pod
+	writeLocalFileToPod(t, headPod.Name, headPod.Spec.Containers[0].Name, "../scripts/verify_tpu_utils.py", "/tmp/verify_tpu_utils.py")
+
+	// Execute verify_tpu_utils.py via Python inside the head pod
+	t.Log("Running verify_tpu_utils.py E2E verification workload...")
+	runCmd := []string{"python3", "/tmp/verify_tpu_utils.py"}
+	stdout, stderr, err := execCommandInPod(t, headPod.Name, headPod.Spec.Containers[0].Name, runCmd)
+	if err != nil {
+		t.Fatalf("TPU utilities and JAX verification failed: %v (stdout: %q, stderr: %q)", err, stdout, stderr)
+	}
+
+	t.Logf("Execution output:\n%s", stdout)
+	assert.Contains(t, stdout, "All Ray core TPU utilities and JAX/XLA distributed inits verified successfully.")
 }

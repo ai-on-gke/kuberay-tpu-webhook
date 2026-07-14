@@ -6,14 +6,12 @@ set -e
 # Required environment variables
 PROJECT_ID=${PROJECT_ID:-$(gcloud config get project)}
 CLUSTER_NAME=${CLUSTER_NAME:-ray-llm-cluster}
-REGION=${REGION:-us-central2}
-ZONE=${ZONE:-us-central2-b}
+REGION=${REGION:-us-central1}
 NETWORK_NAME=${NETWORK_NAME:-${CLUSTER_NAME}-net}
 
 echo "Using Project: $PROJECT_ID"
 echo "Using Cluster Name: $CLUSTER_NAME"
 echo "Using Region: $REGION"
-echo "Using Zone: $ZONE"
 echo "Using Network: $NETWORK_NAME"
 
 # Proceed with setting up VPC network, GKE cluster, and node pools
@@ -31,14 +29,14 @@ else
 fi
 
 # Create subnet if it doesn't exist
-SUBNET_NAME="${NETWORK_NAME}-subnet"
+SUBNET_NAME="${NETWORK_NAME}-subnet-${REGION}"
 if ! gcloud compute networks subnets describe "$SUBNET_NAME" --region "$REGION" >/dev/null 2>&1; then
     echo "Creating subnet $SUBNET_NAME..."
     gcloud compute --project="${PROJECT_ID}" \
         networks subnets create "${SUBNET_NAME}" \
         --network="${NETWORK_NAME}" \
         --region="${REGION}" \
-        --range="${SUBNET_RANGE:-192.168.100.0/24}"
+        --range="${SUBNET_RANGE:-192.168.102.0/24}"
 else
     echo "Subnet $SUBNET_NAME already exists."
 fi
@@ -57,7 +55,7 @@ else
 fi
 
 # Create GKE cluster if it doesn't exist
-if ! gcloud container clusters describe "$CLUSTER_NAME" --zone "$ZONE" >/dev/null 2>&1; then
+if ! gcloud container clusters describe "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
     echo "Creating GKE cluster $CLUSTER_NAME..."
     gcloud container clusters create "$CLUSTER_NAME" \
         --addons=RayOperator \
@@ -66,16 +64,17 @@ if ! gcloud container clusters describe "$CLUSTER_NAME" --zone "$ZONE" >/dev/nul
         --workload-pool="$PROJECT_ID.svc.id.goog" \
         --network="${NETWORK_NAME}" \
         --subnetwork="${SUBNET_NAME}" \
-        --location="$ZONE"
+        --location="$REGION"
 else
     echo "GKE cluster $CLUSTER_NAME already exists. Skipping cluster creation."
 fi
 
-# Provision multi-host TPU slice node pool (defaulting to v6e) if it doesn't exist
-if ! gcloud container node-pools describe v6e-16 --cluster="$CLUSTER_NAME" --zone="$ZONE" >/dev/null 2>&1; then
-    echo "Creating node pool v6e-16..."
-    gcloud container node-pools create v6e-16 \
-        --location="$ZONE" \
+# Provision multi-host TPU slice node pools for v6e
+if ! gcloud container node-pools describe v6e-4x4 --cluster="$CLUSTER_NAME" --region="$REGION" >/dev/null 2>&1; then
+    echo "Creating node pool v6e-4x4 (16 chips)..."
+    gcloud container node-pools create v6e-4x4 \
+        --location="$REGION" \
+        --node-locations="us-central1-b" \
         --cluster="$CLUSTER_NAME" \
         --machine-type=ct6e-standard-4t \
         --threads-per-core=2 \
@@ -85,7 +84,69 @@ if ! gcloud container node-pools describe v6e-16 --cluster="$CLUSTER_NAME" --zon
         --spot \
         --scopes=https://www.googleapis.com/auth/cloud-platform
 else
-    echo "Node pool v6e-16 already exists."
+    echo "Node pool v6e-4x4 already exists."
+fi
+
+if ! gcloud container node-pools describe v6e-2x4 --cluster="$CLUSTER_NAME" --region="$REGION" >/dev/null 2>&1; then
+    echo "Creating node pool v6e-2x4 (8 chips)..."
+    gcloud container node-pools create v6e-2x4 \
+        --location="$REGION" \
+        --node-locations="us-central1-b" \
+        --cluster="$CLUSTER_NAME" \
+        --machine-type=ct6e-standard-4t \
+        --threads-per-core=2 \
+        --tpu-topology=2x4 \
+        --num-nodes=2 \
+        --enable-gvnic \
+        --spot \
+        --scopes=https://www.googleapis.com/auth/cloud-platform
+else
+    echo "Node pool v6e-2x4 already exists."
+fi
+
+# Provision single-host and multi-host TPU node pools for tpu7x
+if ! gcloud container node-pools describe tpu7x-2x2x1 --cluster="$CLUSTER_NAME" --region="$REGION" >/dev/null 2>&1; then
+    echo "Creating node pool tpu7x-2x2x1 (single host)..."
+    gcloud container node-pools create tpu7x-2x2x1 \
+        --location="$REGION" \
+        --node-locations="us-central1-c" \
+        --cluster="$CLUSTER_NAME" \
+        --machine-type=tpu7x-standard-4t \
+        --num-nodes=1 \
+        --enable-gvnic \
+        --spot \
+        --scopes=https://www.googleapis.com/auth/cloud-platform
+else
+    echo "Node pool tpu7x-2x2x1 already exists."
+fi
+
+if ! gcloud container node-pools describe tpu7x-2x2x2 --cluster="$CLUSTER_NAME" --region="$REGION" >/dev/null 2>&1; then
+    WORKLOAD_POLICY_NAME="tpu7x-8-2x2x2-placement-policy"
+    # Create the workload policy if it doesn't exist
+    if ! gcloud compute resource-policies describe "$WORKLOAD_POLICY_NAME" --region="$REGION" >/dev/null 2>&1; then
+        echo "Creating workload policy $WORKLOAD_POLICY_NAME..."
+        gcloud compute resource-policies create workload-policy "$WORKLOAD_POLICY_NAME" \
+            --type=HIGH_THROUGHPUT \
+            --accelerator-topology=2x2x2 \
+            --project="$PROJECT_ID" \
+            --region="$REGION"
+    else
+        echo "Workload policy $WORKLOAD_POLICY_NAME already exists."
+    fi
+
+    echo "Creating node pool tpu7x-2x2x2 (multi host)..."
+    gcloud container node-pools create tpu7x-2x2x2 \
+        --location="$REGION" \
+        --node-locations="us-central1-c" \
+        --cluster="$CLUSTER_NAME" \
+        --machine-type=tpu7x-standard-4t \
+        --placement-policy="$WORKLOAD_POLICY_NAME" \
+        --num-nodes=2 \
+        --enable-gvnic \
+        --spot \
+        --scopes=https://www.googleapis.com/auth/cloud-platform
+else
+    echo "Node pool tpu7x-2x2x2 already exists."
 fi
 
 echo "Cluster setup complete."

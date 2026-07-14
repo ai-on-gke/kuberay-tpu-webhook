@@ -1,14 +1,14 @@
 apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
-  name: tpu-v7x-multi-slice
+  name: tpu-7x-multi-slice
 spec:
   headGroupSpec:
     template:
       spec:
         containers:
         - name: ray-head
-          image: rayproject/ray:nightly-tpu
+          image: rayproject/ray:nightly-py312-tpu
           resources:
             requests:
               cpu: "1"
@@ -24,7 +24,7 @@ spec:
       spec:
         containers:
         - name: ray-worker
-          image: rayproject/ray:nightly-tpu
+          image: rayproject/ray:nightly-py312-tpu
           env:
           - name: MEGASCALE_NUM_SLICES
             value: "2"

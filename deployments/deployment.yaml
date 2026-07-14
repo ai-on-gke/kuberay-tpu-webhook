@@ -80,6 +80,8 @@ spec:
           name: kuberay-tpu-webhook
           args:
           - --v=0 # change this value to 1 for verbose logging
+          - --tls-cert-file=/etc/kuberay-tpu-webhook/tls/tls.crt
+          - --tls-private-key-file=/etc/kuberay-tpu-webhook/tls/tls.key
           ports:
           - name: https
             containerPort: 443
