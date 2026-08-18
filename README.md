@@ -17,7 +17,7 @@ In addition, please ensure the following are installed on your local development
 
 > **Recommendation:** Always install the latest version of the webhook via the published Helm chart.
 >
-> All webhook versions are **strictly backwards-compatible** with earlier TPU generations from v4 through tpu7x and earlier KubeRay Operator versions 1.1.1+. For optimal stability and native worker replica indexing, **KubeRay v1.5.0+** is recommended. Upgrading the webhook does not require an upgrade of your KubeRay operator or Ray application code.
+> All webhook versions are **strictly backwards-compatible** with earlier TPU generations from v4 through tpu7x and earlier KubeRay Operator versions 1.1.1+. For optimal stability and out-of-the-box native worker replica indexing, **KubeRay v1.6.0+** is recommended. Upgrading the webhook does not require an upgrade of your KubeRay operator or Ray application code.
 
 ### Compatibility Matrix
 
