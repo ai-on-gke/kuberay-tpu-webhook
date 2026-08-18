@@ -1748,6 +1748,34 @@ func Test_ValidateRayCluster_SubsliceSingleHostExitsEarly(t *testing.T) {
 	assert.Len(t, resp.Warnings, 0, "Expected no warnings since single-host subslice skips node discovery")
 }
 
+func Test_validateRayCluster_DynamicSlicing_SkipsSubsliceAffinityCheck(t *testing.T) {
+	rayCluster := getTestRayCluster("test-cluster", "test-group", "test-namespace", 4, 1, "4", "tpu7x", "4x4x4", false)
+	rayCluster.Labels = map[string]string{
+		kueueQueueNameLabel: "user-queue",
+	}
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
+		tpuSubsliceTopologyAnnotation:  "2x2x4",
+		kueuePodSetRequiredTopologyAnn: gceTopologyBlockLabel,
+	}
+	// Note: No parent topology in nodeSelector (dynamic slicing format)
+	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
+		gkeTPUAcceleratorLabel: "tpu7x",
+	}
+
+	nodeLister := setupNodeInformer()
+	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+
+	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+	jsonRayCluster, _ := json.Marshal(rayCluster)
+	admissionReview.Request.Object.Raw = jsonRayCluster
+	admissionReview.Request.Object.Object = rayCluster
+
+	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+	assert.NoError(t, err)
+	assert.True(t, resp.Allowed)
+	assert.Equal(t, "Success", resp.Result.Status)
+}
+
 func Test_getSliceToTPUHosts(t *testing.T) {
 	testCPUWorker := getTestCPUWorker("test-cluster", "test-group", "test-namespace")
 	testTPUWorker := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
@@ -2291,6 +2319,41 @@ func Test_MutatePod_Subslice_Error(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, admissionResponse)
 	assert.Contains(t, err.Error(), "schedule pod for subslice on 1 possible nodes not possible")
+}
+
+func Test_mutatePod_DynamicSlicing_SkipsSubsliceAffinityInjection(t *testing.T) {
+	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x4", "4")
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Labels[kueueQueueNameLabel] = "user-queue"
+	pod.Annotations[tpuSubsliceTopologyAnnotation] = "2x2x4"
+	pod.Annotations[kueuePodSetRequiredTopologyAnn] = gceTopologyBlockLabel
+
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-1",
+				Labels: map[string]string{
+					gkeNodePoolLabel:       "tpu-pool",
+					gkeTPUAcceleratorLabel: "tpu7x",
+				},
+			},
+		},
+	}
+	testPodLister := setupInformer()
+	nodeLister := setupNodeInformer(nodes...)
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, nodeLister)
+
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.NotNil(t, admissionResponse)
+	assert.True(t, admissionResponse.Allowed)
 }
 
 func Test_GenerateHeadlessServiceName(t *testing.T) {
