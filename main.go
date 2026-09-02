@@ -49,6 +49,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	kueueconstants "sigs.k8s.io/kueue/pkg/controller/constants"
 )
 
 // slice represents a TPU Pod Slice.
@@ -100,20 +102,18 @@ const (
 	gceTopologySubblockLabel = gkeLabelPrefix + "gce-topology-subblock"
 	gceTopologyHostLabel     = gkeLabelPrefix + "gce-topology-host"
 
-	// Kueue and dynamic slicing labels / annotations.
-	kueueQueueNameLabel            = "kueue.x-k8s.io/queue-name"
-	kueuePodSetRequiredTopologyAnn = "kueue.x-k8s.io/podset-required-topology"
-	skipTPUWebhookCheckAnnotation  = gkeLabelPrefix + "skip-tpu-webhook-check"
+	// Kueue and dynamic slicing annotation.
+	skipTPUWebhookCheckAnnotation = gkeLabelPrefix + "skip-tpu-webhook-check"
 )
 
 // isDynamicSlicingOrKueueManaged returns true if the object has Kueue queue/TAS annotations
 // or explicitly requests bypassing the webhook check.
 func isDynamicSlicingOrKueueManaged(labels, annotations map[string]string) bool {
-	if labels != nil && labels[kueueQueueNameLabel] != "" {
+	if labels != nil && labels[kueueconstants.QueueLabel] != "" {
 		return true
 	}
 	if annotations != nil {
-		if annotations[kueuePodSetRequiredTopologyAnn] != "" || annotations[skipTPUWebhookCheckAnnotation] == "true" {
+		if annotations[kueuev1beta2.PodSetRequiredTopologyAnnotation] != "" || annotations[skipTPUWebhookCheckAnnotation] == "true" {
 			return true
 		}
 	}

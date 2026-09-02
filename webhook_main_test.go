@@ -41,6 +41,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	kueueconstants "sigs.k8s.io/kueue/pkg/controller/constants"
 )
 
 // getTestCPUWorker returns a template for a Ray Pod that requests CPUs.
@@ -1751,11 +1753,11 @@ func Test_ValidateRayCluster_SubsliceSingleHostExitsEarly(t *testing.T) {
 func Test_validateRayCluster_DynamicSlicing_SkipsSubsliceAffinityCheck(t *testing.T) {
 	rayCluster := getTestRayCluster("test-cluster", "test-group", "test-namespace", 4, 1, "4", "tpu7x", "4x4x4", false)
 	rayCluster.Labels = map[string]string{
-		kueueQueueNameLabel: "user-queue",
+		kueueconstants.QueueLabel: "user-queue",
 	}
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
-		tpuSubsliceTopologyAnnotation:  "2x2x4",
-		kueuePodSetRequiredTopologyAnn: gceTopologyBlockLabel,
+		tpuSubsliceTopologyAnnotation:                 "2x2x4",
+		kueuev1beta2.PodSetRequiredTopologyAnnotation: gceTopologyBlockLabel,
 	}
 	// Note: No parent topology in nodeSelector (dynamic slicing format)
 	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
@@ -2326,9 +2328,9 @@ func Test_mutatePod_DynamicSlicing_SkipsSubsliceAffinityInjection(t *testing.T) 
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
-	pod.Labels[kueueQueueNameLabel] = "user-queue"
+	pod.Labels[kueueconstants.QueueLabel] = "user-queue"
 	pod.Annotations[tpuSubsliceTopologyAnnotation] = "2x2x4"
-	pod.Annotations[kueuePodSetRequiredTopologyAnn] = gceTopologyBlockLabel
+	pod.Annotations[kueuev1beta2.PodSetRequiredTopologyAnnotation] = gceTopologyBlockLabel
 
 	admissionReview := getTestAdmissionReview("Pod", "CREATE")
 	jsonPod, _ := json.Marshal(pod)
