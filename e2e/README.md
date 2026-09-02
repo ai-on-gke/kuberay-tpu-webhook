@@ -6,7 +6,7 @@ This directory contains end-to-end (E2E) qualification, mutation, and validation
 
 ## Prerequisites
 
-1.  **Tools**: Install `gcloud`, `kubectl`, and Go `1.25+`.
+1.  **Tools**: Install `gcloud`, `kubectl`, and Go `1.26+`.
 2.  **GCP Project & Quotas**: A GCP project with sufficient TPU quotas for **v6e** and **tpu7x** in `us-central2-b`.
 3.  **Permissions**: IAM permissions to manage cluster networks, subnetworks, firewalls, and node pools.
 
