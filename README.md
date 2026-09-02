@@ -17,14 +17,14 @@ In addition, please ensure the following are installed on your local development
 
 > **Recommendation:** Always install the latest version of the webhook via the published Helm chart.
 >
-> All webhook versions are **strictly backwards-compatible** with earlier TPU generations from v4 through tpu7x and earlier KubeRay Operator versions 1.1.1+. For optimal stability and out-of-the-box native worker replica indexing, **KubeRay v1.6.0+** is recommended. Upgrading the webhook does not require an upgrade of your KubeRay operator or Ray application code.
+> All webhook versions are **strictly backwards-compatible** with earlier TPU generations from v4 through TPU7x and earlier KubeRay Operator versions 1.1.1+. For optimal stability and out-of-the-box native worker replica indexing, **KubeRay v1.6.0+** is recommended. Upgrading the webhook does not require an upgrade of your KubeRay operator or Ray application code.
 
 ### Compatibility Matrix
 
 | Webhook Version | Minimum KubeRay Version | Supported TPU Generations | Key Features Introduced |
 |:---|:---|:---|:---|
-| **`1.4.0`** | **1.1.1+** | TPU v4, v5e, v5p, v6e, tpu7x (Ironwood) | PyTorch / TorchXLA TPU support, TPU subslicing, and dynamic TLS certificate reloading. |
-| **`1.3.1` – `1.3.6`** | **1.1.1+** | TPU v4, v5e, v5p, v6e, tpu7x (Ironwood) | TPU tpu7x (Ironwood) support and NUMA multi-container workloads. |
+| **`1.4.0`** | **1.1.1+** | TPU v4, v5e, v5p, v6e, TPU7x (Ironwood) | PyTorch / TorchXLA TPU support, TPU subslicing, and dynamic TLS certificate reloading. |
+| **`1.3.1` – `1.3.6`** | **1.1.1+** | TPU v4, v5e, v5p, v6e, TPU7x (Ironwood) | TPU7x (Ironwood) support and NUMA multi-container workloads. |
 | **`1.3.0`** | **1.1.1+** | TPU v4, v5e, v5p, v6e | Megascale multi-slice TPU training support. |
 | **`1.2.4` – `1.2.6`** | **1.1.1+** | TPU v4, v5e, v5p, v6e | Single-host and multi-host TPU support for JAX and libtpu, and TPU metrics routing for Ray Dashboard. |
 
@@ -66,9 +66,9 @@ When you submit a RayCluster resource requesting TPUs, this mutating webhook int
 
 * **Network Initialization:**
     * **TPU v4 - v6e:** Automatically generates and injects the `TPU_WORKER_HOSTNAMES` list for multi-host networking. The webhook also sets the `subdomain` and `hostname` fields in the Pod spec.
-    * **TPU tpu7x (Ironwood):** In addition to the vars and fields injected in previous versions, also automatically generates and injects the new `TPU_PROCESS_ADDRESSES` and `TPU_PROCESS_PORT` required for tpu7x architecture. `TPU_PROCESS_ADDRESSES` is identical to `TPU_WORKER_HOSTNAMES`, but with the container port appended for each address.
+    * **TPU7x (Ironwood):** In addition to the vars and fields injected in previous versions, also automatically generates and injects the new `TPU_PROCESS_ADDRESSES` and `TPU_PROCESS_PORT` required for TPU7x architecture. `TPU_PROCESS_ADDRESSES` is identical to `TPU_WORKER_HOSTNAMES`, but with the container port appended for each address.
 * **Worker Identification:** Calculates and injects `TPU_WORKER_ID` and `TPU_NAME` (a unique identifier for the replica group) for multi-host and multi-container coordination.
-* **Multi-Container (NUMA) Support:** Natively supports tpu7x Pods that run multiple NUMA-aligned containers, assigning unique ports and IDs to each ML process. It's important to note that multi-node support per Pod with KubeRay is experimental.
+* **Multi-Container (NUMA) Support:** Natively supports TPU7x Pods that run multiple NUMA-aligned containers, assigning unique ports and IDs to each ML process. It's important to note that multi-node support per Pod with KubeRay is experimental.
 * **Megascale (Multi-Slice) Support:** If `MEGASCALE_NUM_SLICES` is set explicitly in the Pod spec of your Ray container, the webhook automatically calculates and injects `MEGASCALE_SLICE_ID`, `MEGASCALE_COORDINATOR_ADDRESS`, and `MEGASCALE_PORT`. If utilizing the [JaxTrainer](https://docs.ray.io/en/latest/train/api/doc/ray.train.v2.jax.JaxTrainer.html#ray.train.v2.jax.JaxTrainer) in Ray Train, `MEGASCALE_NUM_SLICES` and related env vars are calculated for you based on the value of `num_workers`, `accelerator_type`, and `topology` and set automatically at runtime.
 * **PyTorch / Torch TPU Support:** Automatically generates and injects `TORCH_TPU_TOPOLOGY` and `TORCH_TPU_SLICEBUILDER_ADDRESSES` for distributed PyTorch / TorchXLA TPU workloads.
 * **TPU Subslicing Support:** If `cloud.google.com/gke-tpu-slice-topology` is set as an annotation on the Pod template, the webhook automatically calculates and injects the appropriate `podAffinity` (e.g., `cloud.google.com/gce-topology-subblock`) to ensure that all hosts in a subslice are co-located on the same physical grouping within a larger TPU slice. This enables running multiple independent smaller workloads on a single large TPU reservation.
