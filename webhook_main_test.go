@@ -2357,7 +2357,119 @@ func Test_mutatePod_DynamicSlicing_SkipsSubsliceAffinityInjection(t *testing.T) 
 	assert.NotNil(t, admissionResponse)
 	assert.True(t, admissionResponse.Allowed)
 
-	// Verify that injected affinity uses the Kueue TAS topology key instead of defaulting to nodepool
+	// Verify that no affinity patch is injected when Dynamic Slicing / Kueue is used
+	var patches []patch
+	if len(admissionResponse.Patch) > 0 {
+		err = json.Unmarshal(admissionResponse.Patch, &patches)
+		assert.NoError(t, err)
+		for _, p := range patches {
+			assert.NotEqual(t, "/spec/affinity", p["path"], "Expected /spec/affinity patch to be skipped for Kueue/Dynamic Slicing managed pod")
+		}
+	}
+}
+
+func Test_isDynamicSlicingOrKueueManaged(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expected    bool
+	}{
+		{
+			name:        "nil maps",
+			annotations: nil,
+			expected:    false,
+		},
+		{
+			name:        "no annotations does not bypass",
+			annotations: nil,
+			expected:    false,
+		},
+		{
+			name: "podset-required-topology annotation bypasses",
+			annotations: map[string]string{
+				kueuev1beta2.PodSetRequiredTopologyAnnotation: "cloud.google.com/gke-tpu-partition-2x2x2-id",
+			},
+			expected: true,
+		},
+		{
+			name: "podset-slice-required-topology annotation bypasses",
+			annotations: map[string]string{
+				kueuev1beta2.PodSetSliceRequiredTopologyAnnotation: "cloud.google.com/gke-tpu-partition-4x4x4-id",
+			},
+			expected: true,
+		},
+		{
+			name: "podset-slice-required-topology-constraints annotation bypasses",
+			annotations: map[string]string{
+				kueuev1beta2.PodSetSliceRequiredTopologyConstraintsAnnotation: `[{"topologyLevel":"cloud.google.com/gke-tpu-partition-4x4x4-id","sliceSize":16}]`,
+			},
+			expected: true,
+		},
+		{
+			name: "podset-preferred-topology annotation bypasses",
+			annotations: map[string]string{
+				kueuev1beta2.PodSetPreferredTopologyAnnotation: "cloud.google.com/gce-topology-block",
+			},
+			expected: true,
+		},
+		{
+			name: "skip-tpu-webhook-check=true bypasses",
+			annotations: map[string]string{
+				skipTPUWebhookCheckAnnotation: "true",
+			},
+			expected: true,
+		},
+		{
+			name: "skip-tpu-webhook-check=false does not bypass",
+			annotations: map[string]string{
+				skipTPUWebhookCheckAnnotation: "false",
+			},
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := isDynamicSlicingOrKueueManaged(tc.annotations)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}
+
+func Test_mutatePod_NonTAS_Kueue_InjectsAffinity(t *testing.T) {
+	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "4x4x4", "4")
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Labels[kueueconstants.QueueLabel] = "user-queue"
+	// No TAS annotations on the pod
+
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-1",
+				Labels: map[string]string{
+					gkeNodePoolLabel:       "tpu-pool",
+					gkeTPUAcceleratorLabel: "tpu7x",
+				},
+			},
+		},
+	}
+	testPodLister := setupInformer()
+	nodeLister := setupNodeInformer(nodes...)
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, nodeLister)
+
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.NotNil(t, admissionResponse)
+	assert.True(t, admissionResponse.Allowed)
+
+	// Verify that affinity patch IS injected for non-TAS Kueue pods
 	var patches []patch
 	err = json.Unmarshal(admissionResponse.Patch, &patches)
 	assert.NoError(t, err)
@@ -2365,17 +2477,9 @@ func Test_mutatePod_DynamicSlicing_SkipsSubsliceAffinityInjection(t *testing.T) 
 	for _, p := range patches {
 		if p["path"] == "/spec/affinity" {
 			foundAffinity = true
-			affinityBytes, err := json.Marshal(p["value"])
-			assert.NoError(t, err)
-			var affinity corev1.Affinity
-			err = json.Unmarshal(affinityBytes, &affinity)
-			assert.NoError(t, err)
-			assert.Equal(t, gceTopologyBlockLabel, affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey)
-			assert.Equal(t, gceTopologyBlockLabel, affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey)
-			assert.Equal(t, gceTopologyBlockLabel, affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[1].TopologyKey)
 		}
 	}
-	assert.True(t, foundAffinity, "Expected affinity patch to be injected with the Kueue TAS topology key")
+	assert.True(t, foundAffinity, "Expected /spec/affinity patch to be injected for non-TAS Kueue pod")
 }
 
 func Test_GenerateHeadlessServiceName(t *testing.T) {
