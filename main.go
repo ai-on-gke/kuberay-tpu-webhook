@@ -378,12 +378,11 @@ func injectHostnames(clusterName string, hostNames string, envPath string, conta
 }
 
 // injectTorchTpuEnvsIfNeeded injects Torch TPU environment variables into a Pod if not already set.
-func injectTorchTpuEnvsIfNeeded(hostnames string, pod *corev1.Pod, container corev1.Container, envPath string, patches *[]patch, envArrayExists bool, tpuSupportTensorNode bool) (bool, error) {
+func injectTorchTpuEnvsIfNeeded(hostnames string, topology string, container corev1.Container, envPath string, patches *[]patch, envArrayExists bool, tpuSupportTensorNode bool) (bool, error) {
 	if _, exists := getEnvironmentVariable("TORCH_TPU_TOPOLOGY", container); exists {
 		return envArrayExists, nil
 	}
 
-	topology := pod.Spec.NodeSelector["cloud.google.com/gke-tpu-topology"]
 	topologyDims, err := getDimsFromTopology(topology)
 	if err != nil {
 		return envArrayExists, err
@@ -1212,7 +1211,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			}
 
 			// Network addressing injection logic.
-			isEnvInitialized, err = injectTorchTpuEnvsIfNeeded(hostnames, pod, container, path, &patches, isEnvInitialized, isV7x)
+			isEnvInitialized, err = injectTorchTpuEnvsIfNeeded(hostnames, topology, container, path, &patches, isEnvInitialized, isV7x)
 			if err != nil {
 				return nil, err
 			}
