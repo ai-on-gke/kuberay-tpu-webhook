@@ -1013,7 +1013,7 @@ func Test_InjectTorchTpuEnvsIfNeeded(t *testing.T) {
 			}
 			patches := []patch{}
 
-			_, err := injectTorchTpuEnvsIfNeeded(tc.hostnames, testPod, testPod.Spec.Containers[0], "/spec/containers/0/env", &patches, len(testPod.Spec.Containers[0].Env) > 0, strings.HasPrefix(tc.accelerator, "tpu7x"))
+			_, err := injectTorchTpuEnvsIfNeeded(tc.hostnames, tc.topology, testPod.Spec.Containers[0], "/spec/containers/0/env", &patches, len(testPod.Spec.Containers[0].Env) > 0, strings.HasPrefix(tc.accelerator, "tpu7x"))
 
 			if tc.expectError {
 				assert.Error(t, err)
@@ -2230,54 +2230,92 @@ func Test_MutatePod(t *testing.T) {
 }
 
 func Test_MutatePod_Subslice(t *testing.T) {
-	// Pod with 4x4 topology in nodeSelector, but 2x4 in subslice annotation.
-	pod := getTestTPUWorker("test-cluster", "tpu-group", "default", "tpu-v6e-slice", "4x4", "4")
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
+	tests := []struct {
+		name              string
+		nodeTopology      string
+		subsliceTopology  string
+		expectedHostnames string
+		expectedTorchTopo string
+		expectedAddresses string
+	}{
+		{
+			name:              "multi-host subslice (2x4 in 4x4)",
+			nodeTopology:      "4x4",
+			subsliceTopology:  "2x4",
+			expectedHostnames: "tpu-group-0-0.test-cluster-headless,tpu-group-0-1.test-cluster-headless",
+			expectedTorchTopo: "2,4,1",
+			expectedAddresses: "tpu-group-0-0.test-cluster-headless:8471,tpu-group-0-0.test-cluster-headless:8472,tpu-group-0-0.test-cluster-headless:8473,tpu-group-0-0.test-cluster-headless:8474,tpu-group-0-1.test-cluster-headless:8471,tpu-group-0-1.test-cluster-headless:8472,tpu-group-0-1.test-cluster-headless:8473,tpu-group-0-1.test-cluster-headless:8474",
+		},
+		{
+			name:              "single-host subslice (2x2 in 2x4)",
+			nodeTopology:      "2x4",
+			subsliceTopology:  "2x2",
+			expectedHostnames: "",
+			expectedTorchTopo: "2,2,1",
+			expectedAddresses: "localhost:8471,localhost:8472,localhost:8473,localhost:8474",
+		},
 	}
-	pod.Annotations[tpuSubsliceTopologyAnnotation] = "2x4"
 
-	// set up admissionReview object
-	admissionReview := getTestAdmissionReview("Pod", "CREATE")
-	jsonPod, _ := json.Marshal(pod)
-	admissionReview.Request.Object.Raw = jsonPod
-	admissionReview.Request.Object.Object = pod
-
-	testPodLister := setupInformer()
-	tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
-
-	// mutatePod should succeed and use 2x4 (2 hosts) instead of 4x4 (4 hosts)
-	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
-	assert.NoError(t, err)
-	assert.True(t, admissionResponse.Allowed)
-
-	var patches []patch
-	json.Unmarshal(admissionResponse.Patch, &patches)
-
-	// Check if TPU_WORKER_HOSTNAMES contains only 2 hosts (from 2x4)
-	foundHostnames := false
-	for _, p := range patches {
-		if valMap, ok := p["value"].(map[string]interface{}); ok {
-			if valMap["name"] == "TPU_WORKER_HOSTNAMES" {
-				hostnames := valMap["value"].(string)
-				hosts := strings.Split(hostnames, ",")
-				assert.Equal(t, 2, len(hosts), "Expected 2 hosts in TPU_WORKER_HOSTNAMES for 2x4 subslice")
-				foundHostnames = true
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := getTestTPUWorker("test-cluster", "tpu-group", "default", "tpu-v6e-slice", tc.nodeTopology, "4")
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
 			}
-		} else if valSlice, ok := p["value"].([]interface{}); ok {
-			for _, v := range valSlice {
-				if valMap, ok := v.(map[string]interface{}); ok {
-					if valMap["name"] == "TPU_WORKER_HOSTNAMES" {
-						hostnames := valMap["value"].(string)
-						hosts := strings.Split(hostnames, ",")
-						assert.Equal(t, 2, len(hosts), "Expected 2 hosts in TPU_WORKER_HOSTNAMES for 2x4 subslice")
-						foundHostnames = true
+			pod.Annotations[tpuSubsliceTopologyAnnotation] = tc.subsliceTopology
+
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(pod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object.Object = pod
+
+			testPodLister := setupInformer()
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+			assert.NoError(t, err)
+			assert.True(t, admissionResponse.Allowed)
+
+			var patches []patch
+			err = json.Unmarshal(admissionResponse.Patch, &patches)
+			assert.NoError(t, err)
+
+			findEnvVar := func(name string) (string, bool) {
+				for _, p := range patches {
+					if valMap, ok := p["value"].(map[string]interface{}); ok {
+						if valMap["name"] == name {
+							return valMap["value"].(string), true
+						}
+					} else if valSlice, ok := p["value"].([]interface{}); ok {
+						for _, v := range valSlice {
+							if valMap, ok := v.(map[string]interface{}); ok {
+								if valMap["name"] == name {
+									return valMap["value"].(string), true
+								}
+							}
+						}
 					}
 				}
+				return "", false
 			}
-		}
+
+			hostnames, foundHostnames := findEnvVar("TPU_WORKER_HOSTNAMES")
+			if tc.expectedHostnames != "" {
+				assert.True(t, foundHostnames, "TPU_WORKER_HOSTNAMES patch not found")
+				assert.Equal(t, tc.expectedHostnames, hostnames)
+			} else {
+				assert.False(t, foundHostnames, "TPU_WORKER_HOSTNAMES should not be injected for single-host subslice")
+			}
+
+			torchTopo, foundTorchTopo := findEnvVar("TORCH_TPU_TOPOLOGY")
+			assert.True(t, foundTorchTopo, "TORCH_TPU_TOPOLOGY patch not found")
+			assert.Equal(t, tc.expectedTorchTopo, torchTopo)
+
+			addresses, foundAddresses := findEnvVar("TORCH_TPU_SLICEBUILDER_ADDRESSES")
+			assert.True(t, foundAddresses, "TORCH_TPU_SLICEBUILDER_ADDRESSES patch not found")
+			assert.Equal(t, tc.expectedAddresses, addresses)
+		})
 	}
-	assert.True(t, foundHostnames, "TPU_WORKER_HOSTNAMES patch not found")
 }
 
 func Test_MutatePod_Subslice_Error(t *testing.T) {
