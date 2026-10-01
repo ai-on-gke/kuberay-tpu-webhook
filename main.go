@@ -715,7 +715,7 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 		// If sub-slicing is requested, ensure we can find a satisfying topology key.
 		// Skip if the cluster or worker group is managed by Kueue or Dynamic Slicing.
 		desiredSubslice, subsliceRequested := workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation]
-		clusterSubsliceWithKueue := isDynamicSlicingOrKueueManaged(workerGroupSpec.Template.Annotations)
+		clusterSubsliceWithKueue := isDynamicSlicingOrKueueManaged(raycluster.Annotations)
 		workerGroupSubsliceWithKueue := isDynamicSlicingOrKueueManaged(workerGroupSpec.Template.Annotations)
 		if subsliceRequested && !(clusterSubsliceWithKueue || workerGroupSubsliceWithKueue) {
 			warning, admitErr, err := t.checkSubsliceAffinity(workerGroupSpec, desiredSubslice)

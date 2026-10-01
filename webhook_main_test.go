@@ -1751,31 +1751,56 @@ func Test_ValidateRayCluster_SubsliceSingleHostExitsEarly(t *testing.T) {
 }
 
 func Test_validateRayCluster_DynamicSlicing_SkipsSubsliceAffinityCheck(t *testing.T) {
-	rayCluster := getTestRayCluster("test-cluster", "test-group", "test-namespace", 4, 1, "4", "tpu7x", "4x4x4", false)
-	rayCluster.Labels = map[string]string{
-		kueueconstants.QueueLabel: "user-queue",
-	}
-	rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = map[string]string{
-		tpuSubsliceTopologyAnnotation:                 "2x2x4",
-		kueuev1beta2.PodSetRequiredTopologyAnnotation: gceTopologyBlockLabel,
-	}
-	// Note: No parent topology in nodeSelector (dynamic slicing format)
-	rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
-		gkeTPUAcceleratorLabel: "tpu7x",
+	tests := []struct {
+		name                   string
+		clusterAnnotations     map[string]string
+		workerGroupAnnotations map[string]string
+	}{
+		{
+			name: "worker group template annotation bypasses subslice affinity check",
+			workerGroupAnnotations: map[string]string{
+				tpuSubsliceTopologyAnnotation:                 "2x2x4",
+				kueuev1beta2.PodSetRequiredTopologyAnnotation: gceTopologyBlockLabel,
+			},
+		},
+		{
+			name: "cluster annotation bypasses subslice affinity check",
+			clusterAnnotations: map[string]string{
+				skipTPUWebhookCheckAnnotation: "true",
+			},
+			workerGroupAnnotations: map[string]string{
+				tpuSubsliceTopologyAnnotation: "2x2x4",
+			},
+		},
 	}
 
-	nodeLister := setupNodeInformer()
-	tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rayCluster := getTestRayCluster("test-cluster", "test-group", "test-namespace", 4, 1, "4", "tpu7x", "4x4x4", false)
+			rayCluster.Labels = map[string]string{
+				kueueconstants.QueueLabel: "user-queue",
+			}
+			rayCluster.Annotations = tc.clusterAnnotations
+			rayCluster.Spec.WorkerGroupSpecs[0].Template.Annotations = tc.workerGroupAnnotations
+			// Note: No parent topology in nodeSelector (dynamic slicing format)
+			rayCluster.Spec.WorkerGroupSpecs[0].Template.Spec.NodeSelector = map[string]string{
+				gkeTPUAcceleratorLabel: "tpu7x",
+			}
 
-	admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
-	jsonRayCluster, _ := json.Marshal(rayCluster)
-	admissionReview.Request.Object.Raw = jsonRayCluster
-	admissionReview.Request.Object.Object = rayCluster
+			nodeLister := setupNodeInformer()
+			tpuWebhookServer := NewTPUWebhookServer(nil, nodeLister)
 
-	resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
-	assert.NoError(t, err)
-	assert.True(t, resp.Allowed)
-	assert.Equal(t, "Success", resp.Result.Status)
+			admissionReview := getTestAdmissionReview("RayCluster", "CREATE")
+			jsonRayCluster, _ := json.Marshal(rayCluster)
+			admissionReview.Request.Object.Raw = jsonRayCluster
+			admissionReview.Request.Object.Object = rayCluster
+
+			resp, err := tpuWebhookServer.validateRayCluster(admissionReview)
+			assert.NoError(t, err)
+			assert.True(t, resp.Allowed)
+			assert.Equal(t, "Success", resp.Result.Status)
+		})
+	}
 }
 
 func Test_getSliceToTPUHosts(t *testing.T) {
