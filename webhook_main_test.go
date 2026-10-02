@@ -2387,51 +2387,82 @@ func Test_MutatePod_Subslice_Error(t *testing.T) {
 }
 
 func Test_mutatePod_DynamicSlicing_SkipsSubsliceAffinityInjection(t *testing.T) {
-	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x4", "4")
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	pod.Labels[kueueconstants.QueueLabel] = "user-queue"
-	pod.Annotations[tpuSubsliceTopologyAnnotation] = "2x2x4"
-	pod.Annotations[kueuev1beta2.PodSetRequiredTopologyAnnotation] = gceTopologyBlockLabel
-
-	admissionReview := getTestAdmissionReview("Pod", "CREATE")
-	jsonPod, _ := json.Marshal(pod)
-	admissionReview.Request.Object.Raw = jsonPod
-	admissionReview.Request.Object.Object = pod
-
-	nodes := []*corev1.Node{
+	tests := []struct {
+		name            string
+		annotations     map[string]string
+		schedulingGates []corev1.PodSchedulingGate
+	}{
 		{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "node-1",
-				Labels: map[string]string{
-					gkeNodePoolLabel:       "tpu-pool",
-					gkeTPUAcceleratorLabel: "tpu7x",
-				},
+			name: "podset-required-topology annotation skips affinity injection",
+			annotations: map[string]string{
+				tpuSubsliceTopologyAnnotation:                 "2x2x4",
+				kueuev1beta2.PodSetRequiredTopologyAnnotation: gceTopologyBlockLabel,
+			},
+		},
+		{
+			name: "podset-unconstrained-topology annotation skips affinity injection",
+			annotations: map[string]string{
+				tpuSubsliceTopologyAnnotation:                      "2x2x4",
+				kueuev1beta2.PodSetUnconstrainedTopologyAnnotation: "true",
+			},
+		},
+		{
+			name: "TAS scheduling gate skips affinity injection",
+			annotations: map[string]string{
+				tpuSubsliceTopologyAnnotation: "2x2x4",
+			},
+			schedulingGates: []corev1.PodSchedulingGate{
+				{Name: kueuev1beta2.TopologySchedulingGate},
 			},
 		},
 	}
-	testPodLister := setupInformer()
-	nodeLister := setupNodeInformer(nodes...)
-	tpuWebhookServer := NewTPUWebhookServer(testPodLister, nodeLister)
 
-	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
-	assert.NoError(t, err)
-	assert.NotNil(t, admissionResponse)
-	assert.True(t, admissionResponse.Allowed)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x4", "4")
+			pod.Labels[kueueconstants.QueueLabel] = "user-queue"
+			pod.Annotations = tc.annotations
+			pod.Spec.SchedulingGates = tc.schedulingGates
 
-	// Verify that no affinity patch is injected when Dynamic Slicing / Kueue is used
-	var patches []patch
-	if len(admissionResponse.Patch) > 0 {
-		err = json.Unmarshal(admissionResponse.Patch, &patches)
-		assert.NoError(t, err)
-		for _, p := range patches {
-			assert.NotEqual(t, "/spec/affinity", p["path"], "Expected /spec/affinity patch to be skipped for Kueue/Dynamic Slicing managed pod")
-		}
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(pod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object.Object = pod
+
+			nodes := []*corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "node-1",
+						Labels: map[string]string{
+							gkeNodePoolLabel:       "tpu-pool",
+							gkeTPUAcceleratorLabel: "tpu7x",
+						},
+					},
+				},
+			}
+			testPodLister := setupInformer()
+			nodeLister := setupNodeInformer(nodes...)
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, nodeLister)
+
+			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+			assert.NoError(t, err)
+			assert.NotNil(t, admissionResponse)
+			assert.True(t, admissionResponse.Allowed)
+
+			// Verify that no affinity patch is injected when Dynamic Slicing / Kueue TAS is used
+			var patches []patch
+			if len(admissionResponse.Patch) > 0 {
+				err = json.Unmarshal(admissionResponse.Patch, &patches)
+				assert.NoError(t, err)
+				for _, p := range patches {
+					assert.NotEqual(t, "/spec/affinity", p["path"], "Expected /spec/affinity patch to be skipped for Kueue TAS / Dynamic Slicing managed pod")
+				}
+			}
+		})
 	}
 }
 
-func Test_isDynamicSlicingOrKueueManaged(t *testing.T) {
+func Test_isDynamicSlicingOrKueueTASManaged(t *testing.T) {
 	tests := []struct {
 		name        string
 		annotations map[string]string
@@ -2476,6 +2507,20 @@ func Test_isDynamicSlicingOrKueueManaged(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "podset-unconstrained-topology=true annotation bypasses",
+			annotations: map[string]string{
+				kueuev1beta2.PodSetUnconstrainedTopologyAnnotation: "true",
+			},
+			expected: true,
+		},
+		{
+			name: "podset-unconstrained-topology=false annotation does not bypass",
+			annotations: map[string]string{
+				kueuev1beta2.PodSetUnconstrainedTopologyAnnotation: "false",
+			},
+			expected: false,
+		},
+		{
 			name: "skip-tpu-webhook-check=true bypasses",
 			annotations: map[string]string{
 				skipTPUWebhookCheckAnnotation: "true",
@@ -2493,7 +2538,7 @@ func Test_isDynamicSlicingOrKueueManaged(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := isDynamicSlicingOrKueueManaged(tc.annotations)
+			actual := isDynamicSlicingOrKueueTASManaged(tc.annotations)
 			assert.Equal(t, tc.expected, actual)
 		})
 	}
