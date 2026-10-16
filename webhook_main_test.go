@@ -3856,3 +3856,78 @@ func Test_ApplyPatches_ValueFrom(t *testing.T) {
 	assert.NotNil(t, envVar.ValueFrom.FieldRef)
 	assert.Equal(t, "status.podIP", envVar.ValueFrom.FieldRef.FieldPath)
 }
+
+func Test_SliceScheduler_MutatePod_And_Validate(t *testing.T) {
+	t.Run("mutatePod skips affinity injection for slice-scheduler pod", func(t *testing.T) {
+		pod := getTestTPUWorker("test-cluster", "tpu-group", "default", "tpu7x", "2x2x2", "4")
+		pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+		pod.Labels[utils.RayHostIndexKey] = "1"
+		pod.Spec.SchedulerName = sliceSchedulerName
+
+		admissionReview := getTestAdmissionReview("Pod", "CREATE")
+		jsonPod, _ := json.Marshal(pod)
+		admissionReview.Request.Object.Raw = jsonPod
+		admissionReview.Request.Object.Object = pod
+
+		tpuWebhookServer := NewTPUWebhookServer(setupInformer(), setupNodeInformer())
+		resp, err := tpuWebhookServer.mutatePod(admissionReview)
+		assert.NoError(t, err)
+		assert.True(t, resp.Allowed)
+
+		var patches []patch
+		assert.NoError(t, json.Unmarshal(resp.Patch, &patches))
+
+		var foundAffinity bool
+		for _, p := range patches {
+			if p["path"] == "/spec/affinity" {
+				foundAffinity = true
+			}
+		}
+		assert.False(t, foundAffinity, "Expected /spec/affinity NOT to be injected for slice-scheduler pod")
+	})
+
+	t.Run("validateRayCluster skips subslice affinity check for slice-scheduler worker group", func(t *testing.T) {
+		rc := &rayv1.RayCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "rc-test", Namespace: "default"},
+			Spec: rayv1.RayClusterSpec{
+				WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+					{
+						GroupName:  "tpu-group",
+						NumOfHosts: 2,
+						Template: corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Annotations: map[string]string{
+									tpuSubsliceTopologyAnnotation: "2x2x2",
+								},
+							},
+							Spec: corev1.PodSpec{
+								SchedulerName: sliceSchedulerName,
+								NodeSelector: map[string]string{
+									gkeTPUAcceleratorLabel: "tpu7x",
+									tpuTopologyLabel:       "2x2x2",
+								},
+								Containers: []corev1.Container{
+									{
+										Name: "ray-worker",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
+												tpuResourceName: resource.MustParse("4"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		tpuWebhookServer := NewTPUWebhookServer(setupInformer(), setupNodeInformer())
+		arRC := getTestAdmissionReview("RayCluster", "CREATE")
+		arRC.Request.Object.Raw, _ = json.Marshal(rc)
+		respRC, err := tpuWebhookServer.validateRayCluster(arRC)
+		assert.NoError(t, err)
+		assert.True(t, respRC.Allowed)
+	})
+}
