@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || dynamic_slicing
 
 package webhook
 
@@ -18,9 +18,12 @@ import (
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -62,6 +65,36 @@ const (
 	// Ray-specific labels.
 	rayNodeTypeWorker = string(rayv1.WorkerNode)
 	rayNodeTypeHead   = string(rayv1.HeadNode)
+
+	// Validation error substrings.
+	errTopologyMismatch = "Number of workers in worker group not equal to specified topology"
+
+	// GKE Slice CR annotations.
+	sliceOwnerWorkloadNameAnnotation      = "accelerator.gke.io/owner-workload-name"
+	sliceOwnerWorkloadNamespaceAnnotation = "accelerator.gke.io/owner-workload-namespace"
+)
+
+var (
+	rayClusterGVR = schema.GroupVersionResource{
+		Group:    "ray.io",
+		Version:  "v1",
+		Resource: "rayclusters",
+	}
+	rayJobGVR = schema.GroupVersionResource{
+		Group:    "ray.io",
+		Version:  "v1",
+		Resource: "rayjobs",
+	}
+	workloadGVR = schema.GroupVersionResource{
+		Group:    "kueue.x-k8s.io",
+		Version:  "v1beta2",
+		Resource: "workloads",
+	}
+	sliceGVR = schema.GroupVersionResource{
+		Group:    "accelerator.gke.io",
+		Version:  "v1beta1",
+		Resource: "slices",
+	}
 )
 
 func init() {
@@ -170,6 +203,86 @@ func deletePodsConcurrently(t *testing.T, pods []corev1.Pod) {
 	wg.Wait()
 	if t.Failed() {
 		t.FailNow()
+	}
+}
+
+// waitForClusterCleanup waits until the RayCluster/RayJob, its Pods, its Kueue Workload,
+// and any active Slice CRs owned by it are completely removed from the cluster.
+func waitForClusterCleanup(t *testing.T, ownerKind, ownerName string) {
+	t.Helper()
+	waitForClusterCleanupWithContext(t.Context(), t, ownerKind, ownerName)
+}
+
+func waitForClusterCleanupWithContext(ctx context.Context, t *testing.T, ownerKind, ownerName string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(ctx, 3*time.Second, 4*time.Minute, true, func(ctx context.Context) (bool, error) {
+		// 1. Check owner object is gone.
+		gvr := rayClusterGVR
+		if ownerKind == "RayJob" {
+			gvr = rayJobGVR
+		}
+		_, err := dynamicClient.Resource(gvr).Namespace(testNamespace).Get(ctx, ownerName, metav1.GetOptions{})
+		if err == nil {
+			return false, nil
+		}
+		if !apierrors.IsNotFound(err) {
+			return false, err
+		}
+
+		// 2. Check pods in testNamespace for this cluster prefix are gone.
+		pods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, err
+		}
+		for _, p := range pods.Items {
+			clusterLabel := p.Labels[utils.RayClusterLabelKey]
+			if clusterLabel == ownerName || strings.HasPrefix(clusterLabel, ownerName+"-") || strings.HasPrefix(p.Name, ownerName+"-") {
+				return false, nil
+			}
+		}
+
+		// 3. Check Kueue Workloads owned by this object are gone.
+		wls, err := dynamicClient.Resource(workloadGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				return false, err
+			}
+		} else {
+			for _, wl := range wls.Items {
+				for _, ref := range wl.GetOwnerReferences() {
+					if ref.Kind == ownerKind && ref.Name == ownerName {
+						return false, nil
+					}
+				}
+			}
+		}
+
+		// 4. Check Slice CRs (accelerator.gke.io/v1beta1) owned by this object are gone.
+		slices, err := dynamicClient.Resource(sliceGVR).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				return false, err
+			}
+		} else {
+			for _, s := range slices.Items {
+				annotations := s.GetAnnotations()
+				if annotations != nil {
+					ownerWl := annotations[sliceOwnerWorkloadNameAnnotation]
+					if ownerWl == ownerName ||
+						strings.HasPrefix(ownerWl, ownerName+"-") ||
+						strings.HasPrefix(ownerWl, "raycluster-"+ownerName) ||
+						strings.HasPrefix(ownerWl, "rayjob-"+ownerName) ||
+						strings.Contains(ownerWl, ownerName) {
+						return false, nil
+					}
+				}
+			}
+		}
+
+		return true, nil
+	})
+	if err != nil {
+		require.NoError(t, err, "cleanup wait for %s %s/%s timed out, leaking cluster resources", ownerKind, testNamespace, ownerName)
 	}
 }
 
@@ -368,4 +481,78 @@ func waitForRecreatedPods(
 		t.Fatalf("Timed out waiting for recreated pods: %v (found %d/%d)", err, len(recreatedPods), expectedCount)
 	}
 	return recreatedPods
+}
+
+// assertRayClusterRejected is a helper function to verify that creating a RayCluster
+// with invalid configurations is rejected by the validating webhook.
+func assertRayClusterRejected(t *testing.T, cluster *rayv1.RayCluster, expectedErrorMessage string) {
+	t.Helper()
+	require.NotEmpty(t, expectedErrorMessage, "expectedErrorMessage must not be empty to avoid false-positive test passes")
+
+	unstructuredObj, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(cluster)
+	if err != nil {
+		t.Fatalf("Error converting RayCluster to unstructured: %v", err)
+	}
+
+	gvr := schema.GroupVersionResource{
+		Group:    "ray.io",
+		Version:  "v1",
+		Resource: "rayclusters",
+	}
+
+	res, err := dynamicClient.Resource(gvr).Namespace(testNamespace).
+		Create(t.Context(), &unstructured.Unstructured{Object: unstructuredObj}, metav1.CreateOptions{})
+	if err == nil {
+		t.Logf("Cleaning up leaked RayCluster %q...", res.GetName())
+		_ = dynamicClient.Resource(gvr).Namespace(testNamespace).
+			Delete(t.Context(), res.GetName(), metav1.DeleteOptions{})
+		t.Fatalf("Expected cluster creation to fail due to webhook validation, but it succeeded")
+	}
+
+	statusErr, ok := err.(*apierrors.StatusError)
+	if !ok {
+		t.Fatalf("Expected StatusError from API server, got: %T (error: %v)", err, err)
+	}
+
+	assert.Contains(
+		t,
+		statusErr.Error(),
+		expectedErrorMessage,
+		"Validation rejected, but with unexpected error message",
+	)
+}
+
+// waitForRayJobSuccess is a helper function to poll and block until the RayJob
+// successfully completes (SUCCEEDED).
+func waitForRayJobSuccess(t *testing.T, jobName string, timeout time.Duration) {
+	t.Helper()
+	t.Logf("Waiting for RayJob %s to reach SUCCEEDED status...", jobName)
+
+	err := wait.PollUntilContextTimeout(t.Context(), 10*time.Second, timeout,
+		true, func(ctx context.Context) (bool, error) {
+			unstructJob, err := dynamicClient.Resource(rayJobGVR).
+				Namespace(testNamespace).Get(ctx, jobName, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+
+			status, found, err := unstructured.NestedString(unstructJob.Object, "status", "jobStatus")
+			if err != nil || !found {
+				t.Logf("RayJob %s status not found yet.", jobName)
+				return false, nil
+			}
+
+			t.Logf("RayJob %s current status: %s", jobName, status)
+			if status == "SUCCEEDED" {
+				return true, nil
+			}
+			if status == "FAILED" {
+				return false, fmt.Errorf("RayJob %s failed", jobName)
+			}
+			return false, nil
+		})
+
+	if err != nil {
+		t.Fatalf("RayJob %s did not succeed within %v: %v", jobName, timeout, err)
+	}
 }

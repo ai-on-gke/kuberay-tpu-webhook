@@ -1,0 +1,56 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: tpu7x-ds-multi-container
+  labels:
+    kueue.x-k8s.io/queue-name: lq
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+            limits:
+              cpu: "1"
+              memory: "4Gi"
+  workerGroupSpecs:
+  - replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    groupName: tpu-worker-group
+    numOfHosts: 2
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          cloud.google.com/gke-tpu-slice-topology: 2x2x2
+      spec:
+        containers:
+        - name: ray-worker-0
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              google.com/tpu: "2"
+            limits:
+              google.com/tpu: "2"
+        - name: ray-worker-1
+          image: rayproject/ray:nightly-py312-tpu
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              google.com/tpu: "2"
+            limits:
+              google.com/tpu: "2"
+        tolerations:
+        - key: "google.com/tpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x

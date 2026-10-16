@@ -1,0 +1,92 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: tpu7x-ds-multi-group
+  labels:
+    kueue.x-k8s.io/queue-name: lq
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+            limits:
+              cpu: "1"
+              memory: "4Gi"
+  workerGroupSpecs:
+  - replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    groupName: tpu-group-a
+    numOfHosts: 2
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          cloud.google.com/gke-tpu-slice-topology: 2x2x2
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              google.com/tpu: "4"
+            limits:
+              google.com/tpu: "4"
+        tolerations:
+        - key: "google.com/tpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+  - replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    groupName: tpu-group-b
+    numOfHosts: 4
+    rayStartParams: {}
+    template:
+      metadata:
+        annotations:
+          cloud.google.com/gke-tpu-slice-topology: 2x2x4
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              google.com/tpu: "4"
+            limits:
+              google.com/tpu: "4"
+        tolerations:
+        - key: "google.com/tpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+  - replicas: 1
+    minReplicas: 1
+    maxReplicas: 1
+    groupName: cpu-group
+    numOfHosts: 1
+    rayStartParams: {}
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:nightly-py312-tpu
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"

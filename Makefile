@@ -45,6 +45,10 @@ test:
 e2e:
 	./scripts/run-e2e.sh
 
+# Run TPU7x Dynamic Slicing E2E tests against the current kubectl cluster.
+e2e-dynamic-slicing:
+	go test -timeout 45m -tags=dynamic_slicing -count=1 -v ./e2e/webhook/...
+
 uninstall:
 	kubectl delete -f deployments/
 
@@ -71,4 +75,4 @@ img-swap:
 	docker push ${IMG}
 	EDITOR="sed -i \"s|^\( \+\)image: .*$$|\1image: ${IMG}|\"" kubectl edit deployment -n ray-system kuberay-tpu-webhook
 
-.PHONY: webhook run fmt vet test e2e deploy uninstall docker-build docker-push deploy-cert uninstall-cert img-swap
+.PHONY: webhook run fmt vet test e2e e2e-dynamic-slicing deploy uninstall docker-build docker-push deploy-cert uninstall-cert img-swap
