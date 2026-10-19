@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || dynamic_slicing
 
 package webhook
 
@@ -18,9 +18,12 @@ import (
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -62,6 +65,22 @@ const (
 	// Ray-specific labels.
 	rayNodeTypeWorker = string(rayv1.WorkerNode)
 	rayNodeTypeHead   = string(rayv1.HeadNode)
+
+	// Validation error substrings.
+	errTopologyMismatch = "Number of workers in worker group not equal to specified topology"
+)
+
+var (
+	rayClusterGVR = schema.GroupVersionResource{
+		Group:    "ray.io",
+		Version:  "v1",
+		Resource: "rayclusters",
+	}
+	rayJobGVR = schema.GroupVersionResource{
+		Group:    "ray.io",
+		Version:  "v1",
+		Resource: "rayjobs",
+	}
 )
 
 func init() {
@@ -289,13 +308,8 @@ func waitForAllPodsRunning(
 
 func triggerRayClusterReconcile(t *testing.T, clusterName string) {
 	t.Helper()
-	gvr := schema.GroupVersionResource{
-		Group:    "ray.io",
-		Version:  "v1",
-		Resource: "rayclusters",
-	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cluster, err := dynamicClient.Resource(gvr).Namespace(testNamespace).
+		cluster, err := dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
 			Get(t.Context(), clusterName, metav1.GetOptions{})
 		if err != nil {
 			return err
@@ -308,7 +322,8 @@ func triggerRayClusterReconcile(t *testing.T, clusterName string) {
 		annotations["tpu-webhook.gke.io/reconcile-trigger"] = fmt.Sprint(time.Now().UnixNano())
 		cluster.SetAnnotations(annotations)
 
-		_, err = dynamicClient.Resource(gvr).Namespace(testNamespace).Update(t.Context(), cluster, metav1.UpdateOptions{})
+		_, err = dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+			Update(t.Context(), cluster, metav1.UpdateOptions{})
 		return err
 	})
 
@@ -368,4 +383,72 @@ func waitForRecreatedPods(
 		t.Fatalf("Timed out waiting for recreated pods: %v (found %d/%d)", err, len(recreatedPods), expectedCount)
 	}
 	return recreatedPods
+}
+
+// assertRayClusterRejected is a helper function to verify that creating a RayCluster
+// with invalid configurations is rejected by the validating webhook.
+func assertRayClusterRejected(t *testing.T, cluster *rayv1.RayCluster, expectedErrorMessage string) {
+	t.Helper()
+	require.NotEmpty(t, expectedErrorMessage, "expectedErrorMessage must not be empty to avoid false-positive test passes")
+
+	unstructuredObj, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(cluster)
+	if err != nil {
+		t.Fatalf("Error converting RayCluster to unstructured: %v", err)
+	}
+
+	res, err := dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+		Create(t.Context(), &unstructured.Unstructured{Object: unstructuredObj}, metav1.CreateOptions{})
+	if err == nil {
+		t.Logf("Cleaning up leaked RayCluster %q...", res.GetName())
+		_ = dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+			Delete(t.Context(), res.GetName(), metav1.DeleteOptions{})
+		t.Fatalf("Expected cluster creation to fail due to webhook validation, but it succeeded")
+	}
+
+	statusErr, ok := err.(*apierrors.StatusError)
+	if !ok {
+		t.Fatalf("Expected StatusError from API server, got: %T (error: %v)", err, err)
+	}
+
+	assert.Contains(
+		t,
+		statusErr.Error(),
+		expectedErrorMessage,
+		"Validation rejected, but with unexpected error message",
+	)
+}
+
+// waitForRayJobSuccess is a helper function to poll and block until the RayJob
+// successfully completes (SUCCEEDED).
+func waitForRayJobSuccess(t *testing.T, jobName string, timeout time.Duration) {
+	t.Helper()
+	t.Logf("Waiting for RayJob %s to reach SUCCEEDED status...", jobName)
+
+	err := wait.PollUntilContextTimeout(t.Context(), 10*time.Second, timeout,
+		true, func(ctx context.Context) (bool, error) {
+			unstructJob, err := dynamicClient.Resource(rayJobGVR).
+				Namespace(testNamespace).Get(ctx, jobName, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+
+			status, found, err := unstructured.NestedString(unstructJob.Object, "status", "jobStatus")
+			if err != nil || !found {
+				t.Logf("RayJob %s status not found yet.", jobName)
+				return false, nil
+			}
+
+			t.Logf("RayJob %s current status: %s", jobName, status)
+			if status == "SUCCEEDED" {
+				return true, nil
+			}
+			if status == "FAILED" {
+				return false, fmt.Errorf("RayJob %s failed", jobName)
+			}
+			return false, nil
+		})
+
+	if err != nil {
+		t.Fatalf("RayJob %s did not succeed within %v: %v", jobName, timeout, err)
+	}
 }

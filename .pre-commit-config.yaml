@@ -40,6 +40,6 @@ repos:
       - id: golangci-lint
         name: golangci-lint
         language: system
-        entry: ./bin/golangci-lint run --build-tags e2e
+        entry: ./bin/golangci-lint run --build-tags e2e,dynamic_slicing
         types: [go]
         pass_filenames: false
