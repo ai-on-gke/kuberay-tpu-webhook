@@ -827,9 +827,9 @@ func sliceIsSubset(parent, child string) bool {
 // its index in container.Env, and whether it exists
 func getEnvironmentVariable(varName string, container corev1.Container) (string, int, bool) {
 	if container.Env != nil && len(container.Env) > 0 {
-		for i, envVar := range container.Env {
-			if envVar.Name == varName {
-				return envVar.Value, i, true
+		for i := len(container.Env) - 1; i >= 0; i-- {
+			if container.Env[i].Name == varName {
+				return container.Env[i].Value, i, true
 			}
 		}
 	}
@@ -1266,7 +1266,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			}
 
 			// inject TPU_DEVICE_PLUGIN_HOST_IP. This Env Var is required for TPU_DEVICE_PLUGIN_ADDR
-			if _, envIdx, exists := getEnvironmentVariable("TPU_DEVICE_PLUGIN_HOST_IP", container); !exists {
+			if _, _, exists := getEnvironmentVariable("TPU_DEVICE_PLUGIN_HOST_IP", container); !exists {
 				klog.V(1).InfoS("mutatePod, add TPU_DEVICE_PLUGIN_HOST_IP", "RayCluster", namespace+"/"+clusterName)
 				tpuDevicePluginAddr := corev1.EnvVar{
 					Name: "TPU_DEVICE_PLUGIN_HOST_IP",
@@ -1276,7 +1276,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 						},
 					},
 				}
-				patches, isEnvInitialized = setEnvVarPatch(patches, tpuDevicePluginAddr, path, envIdx, isEnvInitialized)
+				patches, isEnvInitialized = addEnvVarPatch(patches, tpuDevicePluginAddr, path, isEnvInitialized)
 			}
 
 			// inject TPU_DEVICE_PLUGIN_ADDR
