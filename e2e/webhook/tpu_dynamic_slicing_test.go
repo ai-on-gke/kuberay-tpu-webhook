@@ -47,10 +47,12 @@ const (
 	kueueTopologySchedulingGate                 = "kueue.x-k8s.io/topology"
 
 	// GKE Slice CR annotations, labels, and conditions.
-	sliceOwnerPodSetNameAnnotation = "accelerator.gke.io/owner-podset-name"
-	sliceUsedByNamespaceLabel      = "kueue.gke.io/tpu-slice-used-by-namespace"
-	sliceUsedByWorkloadLabel       = "kueue.gke.io/tpu-slice-used-by-workload"
-	sliceInUseConditionType        = "KueueAcInUse"
+	sliceOwnerWorkloadNameAnnotation      = "accelerator.gke.io/owner-workload-name"
+	sliceOwnerWorkloadNamespaceAnnotation = "accelerator.gke.io/owner-workload-namespace"
+	sliceOwnerPodSetNameAnnotation        = "accelerator.gke.io/owner-podset-name"
+	sliceUsedByNamespaceLabel             = "kueue.gke.io/tpu-slice-used-by-namespace"
+	sliceUsedByWorkloadLabel              = "kueue.gke.io/tpu-slice-used-by-workload"
+	sliceInUseConditionType               = "KueueAcInUse"
 
 	// Default Kueue queue names on dynamic-slicing clusters.
 	defaultDSLocalQueueName   = "lq"
@@ -58,6 +60,16 @@ const (
 )
 
 var (
+	workloadGVR = schema.GroupVersionResource{
+		Group:    "kueue.x-k8s.io",
+		Version:  "v1beta2",
+		Resource: "workloads",
+	}
+	sliceGVR = schema.GroupVersionResource{
+		Group:    "accelerator.gke.io",
+		Version:  "v1beta1",
+		Resource: "slices",
+	}
 	localQueueGVR = schema.GroupVersionResource{
 		Group:    "kueue.x-k8s.io",
 		Version:  "v1beta2",
@@ -141,6 +153,85 @@ func applyQueueOverride(labels map[string]string) map[string]string {
 	return labels
 }
 
+// waitForClusterCleanup waits until the RayCluster/RayJob, its Pods, its Kueue Workload,
+// and any active Slice CRs owned by it are completely removed from the cluster.
+func waitForClusterCleanup(t *testing.T, ownerKind, ownerName string) {
+	t.Helper()
+	waitForClusterCleanupWithContext(t.Context(), t, ownerKind, ownerName)
+}
+
+func waitForClusterCleanupWithContext(ctx context.Context, t *testing.T, ownerKind, ownerName string) {
+	t.Helper()
+	err := wait.PollUntilContextTimeout(
+		ctx, 3*time.Second, 4*time.Minute, true, func(ctx context.Context) (bool, error) {
+			// 1. Check owner object is gone.
+			gvr := rayClusterGVR
+			if ownerKind == "RayJob" {
+				gvr = rayJobGVR
+			}
+			_, err := dynamicClient.Resource(gvr).Namespace(testNamespace).Get(ctx, ownerName, metav1.GetOptions{})
+			if err == nil {
+				return false, nil
+			}
+			if !apierrors.IsNotFound(err) {
+				return false, err
+			}
+
+			// 2. Check pods in testNamespace for this cluster prefix are gone.
+			pods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return false, err
+			}
+			for _, p := range pods.Items {
+				clusterLabel := p.Labels[utils.RayClusterLabelKey]
+				if clusterLabel == ownerName || strings.HasPrefix(clusterLabel, ownerName+"-") ||
+					strings.HasPrefix(p.Name, ownerName+"-") {
+					return false, nil
+				}
+			}
+
+			// 3. Check Kueue Workloads owned by this object are gone.
+			wls, err := dynamicClient.Resource(workloadGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, err
+				}
+			} else {
+				for _, wl := range wls.Items {
+					for _, ref := range wl.GetOwnerReferences() {
+						if ref.Kind == ownerKind && ref.Name == ownerName {
+							return false, nil
+						}
+					}
+				}
+			}
+
+			// 4. Check Slice CRs (accelerator.gke.io/v1beta1) owned by this object in testNamespace are gone.
+			slices, err := dynamicClient.Resource(sliceGVR).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, err
+				}
+			} else {
+				for _, s := range slices.Items {
+					annotations := s.GetAnnotations()
+					if annotations != nil && annotations[sliceOwnerWorkloadNamespaceAnnotation] == testNamespace {
+						ownerWl := annotations[sliceOwnerWorkloadNameAnnotation]
+						if strings.Contains(ownerWl, ownerName) {
+							return false, nil
+						}
+					}
+				}
+			}
+
+			return true, nil
+		})
+	if err != nil {
+		require.NoError(t, err,
+			"cleanup wait for %s %s/%s timed out, leaking cluster resources", ownerKind, testNamespace, ownerName)
+	}
+}
+
 // createRayClusterFromManifest loads a RayCluster YAML manifest, creates it in testNamespace,
 // registers automatic cleanup, and returns the mutated RayCluster stored on the API server.
 func createRayClusterFromManifest(t *testing.T, relativePath string) *rayv1.RayCluster {
@@ -198,51 +289,54 @@ func loadRayJobManifest(t *testing.T, relativePath string) *rayv1.RayJob {
 
 // waitForWorkloadAdmitted waits for the Kueue Workload owned by (ownerKind, ownerName)
 // to be created and reach Admitted=True.
-func waitForWorkloadAdmitted(t *testing.T, ownerKind, ownerName string, timeout time.Duration) *unstructured.Unstructured {
+func waitForWorkloadAdmitted(
+	t *testing.T, ownerKind, ownerName string, timeout time.Duration,
+) *unstructured.Unstructured {
 	t.Helper()
 	t.Logf("Waiting for Kueue Workload of %s %s/%s to be admitted...", ownerKind, testNamespace, ownerName)
 
 	var admittedWL *unstructured.Unstructured
-	err := wait.PollUntilContextTimeout(t.Context(), 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		wls, err := dynamicClient.Resource(workloadGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return false, err
-		}
-		for i := range wls.Items {
-			wl := &wls.Items[i]
-			matchedOwner := false
-			for _, ref := range wl.GetOwnerReferences() {
-				if ref.Kind == ownerKind && ref.Name == ownerName {
-					matchedOwner = true
-					break
+	err := wait.PollUntilContextTimeout(
+		t.Context(), 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+			wls, err := dynamicClient.Resource(workloadGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return false, err
+			}
+			for i := range wls.Items {
+				wl := &wls.Items[i]
+				matchedOwner := false
+				for _, ref := range wl.GetOwnerReferences() {
+					if ref.Kind == ownerKind && ref.Name == ownerName {
+						matchedOwner = true
+						break
+					}
 				}
-			}
-			if !matchedOwner {
-				continue
-			}
-
-			conditions, found, _ := unstructured.NestedSlice(wl.Object, "status", "conditions")
-			if !found {
-				t.Logf("Workload %s found, waiting for conditions...", wl.GetName())
-				return false, nil
-			}
-			for _, c := range conditions {
-				condMap, ok := c.(map[string]any)
-				if !ok {
+				if !matchedOwner {
 					continue
 				}
-				if condMap["type"] == "Admitted" && condMap["status"] == "True" {
-					admittedWL = wl.DeepCopy()
-					return true, nil
+
+				conditions, found, _ := unstructured.NestedSlice(wl.Object, "status", "conditions")
+				if !found {
+					t.Logf("Workload %s found, waiting for conditions...", wl.GetName())
+					return false, nil
 				}
-				if condMap["type"] == "Admitted" {
-					t.Logf("Workload %s Admitted=%v (reason=%v, message=%v)",
-						wl.GetName(), condMap["status"], condMap["reason"], condMap["message"])
+				for _, c := range conditions {
+					condMap, ok := c.(map[string]any)
+					if !ok {
+						continue
+					}
+					if condMap["type"] == "Admitted" && condMap["status"] == "True" {
+						admittedWL = wl.DeepCopy()
+						return true, nil
+					}
+					if condMap["type"] == "Admitted" {
+						t.Logf("Workload %s Admitted=%v (reason=%v, message=%v)",
+							wl.GetName(), condMap["status"], condMap["reason"], condMap["message"])
+					}
 				}
 			}
-		}
-		return false, nil
-	})
+			return false, nil
+		})
 	require.NoError(t, err, "Timed out waiting for Kueue Workload of %s %s to be admitted", ownerKind, ownerName)
 	return admittedWL
 }
@@ -272,45 +366,47 @@ func waitForSlicesActive(
 	t.Logf("Waiting for %d Slice CR(s) of Workload %s to become ACTIVE...", expectedCount, workloadName)
 
 	var activeSlices []unstructured.Unstructured
-	err := wait.PollUntilContextTimeout(t.Context(), 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		matched, err := findSlicesForWorkload(ctx, workloadName)
-		if err != nil {
-			return false, err
-		}
-		if len(matched) < expectedCount {
-			t.Logf("Found %d/%d Slice CR(s) for Workload %s...", len(matched), expectedCount, workloadName)
-			return false, nil
-		}
+	err := wait.PollUntilContextTimeout(
+		t.Context(), 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+			matched, err := findSlicesForWorkload(ctx, workloadName)
+			if err != nil {
+				return false, err
+			}
+			if len(matched) < expectedCount {
+				t.Logf("Found %d/%d Slice CR(s) for Workload %s...", len(matched), expectedCount, workloadName)
+				return false, nil
+			}
 
-		allReady := true
-		for _, s := range matched {
-			conds, _, _ := unstructured.NestedSlice(s.Object, "status", "conditions")
-			ready := false
-			reason := ""
-			for _, c := range conds {
-				cm, ok := c.(map[string]any)
-				if !ok {
-					continue
-				}
-				if cm["type"] == "Ready" {
-					reason, _ = cm["reason"].(string)
-					if cm["status"] == "True" {
-						ready = true
+			allReady := true
+			for _, s := range matched {
+				conds, _, _ := unstructured.NestedSlice(s.Object, "status", "conditions")
+				ready := false
+				reason := ""
+				for _, c := range conds {
+					cm, ok := c.(map[string]any)
+					if !ok {
+						continue
+					}
+					if cm["type"] == "Ready" {
+						reason, _ = cm["reason"].(string)
+						if cm["status"] == "True" {
+							ready = true
+						}
 					}
 				}
+				t.Logf("Slice %s: Ready=%t (reason=%s)", s.GetName(), ready, reason)
+				if !ready {
+					allReady = false
+				}
 			}
-			t.Logf("Slice %s: Ready=%t (reason=%s)", s.GetName(), ready, reason)
-			if !ready {
-				allReady = false
+			if allReady && len(matched) == expectedCount {
+				activeSlices = matched
+				return true, nil
 			}
-		}
-		if allReady && len(matched) == expectedCount {
-			activeSlices = matched
-			return true, nil
-		}
-		return false, nil
-	})
-	require.NoError(t, err, "Timed out waiting for %d Slice CR(s) of Workload %s to become ACTIVE", expectedCount, workloadName)
+			return false, nil
+		})
+	require.NoError(t, err,
+		"Timed out waiting for %d Slice CR(s) of Workload %s to become ACTIVE", expectedCount, workloadName)
 	return activeSlices
 }
 
@@ -400,7 +496,9 @@ def check_jax_worker():
     jax.distributed.initialize()
     global_devs = jax.device_count()
     local_devs = jax.local_device_count()
-    assert global_devs == expected_global_devices, f"Expected {expected_global_devices} global devices, got {global_devs}"
+    assert global_devs == expected_global_devices, (
+        f"Expected {expected_global_devices} global devices, got {global_devs}"
+    )
     assert local_devs == expected_local_devices, f"Expected {expected_local_devices} local devices, got {local_devs}"
 
     x = jax.random.normal(jax.random.PRNGKey(0), (1024, 1024), dtype=jnp.bfloat16)
@@ -434,7 +532,8 @@ print("DYNAMIC_SLICING_JAX_CHECK_PASSED")
 	require.NoError(t, err, "Failed writing JAX check script to head pod (stdout=%q, stderr=%q)", stdout, stderr)
 
 	t.Logf("Executing distributed JAX check across %d hosts (%d global devices)...", numHosts, expectedGlobalDevices)
-	stdout, stderr, err = execCommandInPod(t, headPod.Name, headPod.Spec.Containers[0].Name, []string{"python3", remotePath})
+	stdout, stderr, err = execCommandInPod(
+		t, headPod.Name, headPod.Spec.Containers[0].Name, []string{"python3", remotePath})
 	require.NoError(t, err, "Distributed JAX check failed (stdout=%q, stderr=%q)", stdout, stderr)
 	t.Logf("JAX check output:\n%s", stdout)
 	assert.Contains(t, stdout, "DYNAMIC_SLICING_JAX_CHECK_PASSED")
@@ -604,7 +703,9 @@ func TestDynamicSlicing_SubSlice_2x2x2(t *testing.T) {
 		wgTemplate := createdCluster.Spec.WorkerGroupSpecs[0].Template
 
 		assert.Equal(t, gceTopologyBlockLabel, wgTemplate.Annotations[kueuePodSetRequiredTopology])
-		assert.Equal(t, "cloud.google.com/gke-tpu-partition-2x2x2-id", wgTemplate.Annotations[kueuePodSetSliceRequiredTopology])
+		assert.Equal(
+			t, "cloud.google.com/gke-tpu-partition-2x2x2-id",
+			wgTemplate.Annotations[kueuePodSetSliceRequiredTopology])
 		assert.Equal(t, "2", wgTemplate.Annotations[kueuePodSetSliceSize])
 		assertSliceHealthNodeAffinity(t, wgTemplate.Spec.Affinity, "cloud.google.com/gke-tpu-partition-2x2x2-state")
 
@@ -641,7 +742,8 @@ func TestDynamicSlicing_SubSlice_2x2x2(t *testing.T) {
 		assert.NotEmpty(t, sliceLabels[sliceUsedByWorkloadLabel])
 		assert.Equal(t, "tpu-worker-group", sliceAnnotations[sliceOwnerPodSetNameAnnotation])
 
-		// Verify preferred nodeAffinity for cloud.google.com/gke-tpu-topology In [2x2x2] was injected by kueue-slice-controller.
+		// Verify preferred nodeAffinity for cloud.google.com/gke-tpu-topology In [2x2x2] was
+		// injected by kueue-slice-controller.
 		require.NotNil(t, wgTemplate.Spec.Affinity)
 		require.NotNil(t, wgTemplate.Spec.Affinity.NodeAffinity)
 		foundPreferred := false
@@ -732,15 +834,18 @@ func TestDynamicSlicing_SubSlice_2x2x2(t *testing.T) {
 		require.Len(t, hostnames, 2)
 
 		for _, hn := range hostnames {
-			err := wait.PollUntilContextTimeout(t.Context(), 2*time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-				stdout, stderr, err := execCommandInPod(t, workerPod.Name, workerPod.Spec.Containers[0].Name, []string{"getent", "hosts", hn})
-				if err != nil {
-					t.Logf("Waiting for DNS %s (stderr=%q)...", hn, stderr)
-					return false, nil
-				}
-				t.Logf("Resolved %s -> %s", hn, strings.TrimSpace(stdout))
-				return true, nil
-			})
+			err := wait.PollUntilContextTimeout(
+				t.Context(), 2*time.Second, 30*time.Second, true,
+				func(ctx context.Context) (bool, error) {
+					stdout, stderr, err := execCommandInPod(
+						t, workerPod.Name, workerPod.Spec.Containers[0].Name, []string{"getent", "hosts", hn})
+					if err != nil {
+						t.Logf("Waiting for DNS %s (stderr=%q)...", hn, stderr)
+						return false, nil
+					}
+					t.Logf("Resolved %s -> %s", hn, strings.TrimSpace(stdout))
+					return true, nil
+				})
 			assert.NoError(t, err, "Failed resolving %s inside pod %s", hn, workerPod.Name)
 		}
 	})
@@ -879,10 +984,14 @@ func TestDynamicSlicing_MultiWorkerGroup(t *testing.T) {
 	for _, wg := range createdCluster.Spec.WorkerGroupSpecs {
 		switch wg.GroupName {
 		case "tpu-group-a":
-			assert.Equal(t, "cloud.google.com/gke-tpu-partition-2x2x2-id", wg.Template.Annotations[kueuePodSetSliceRequiredTopology])
+			assert.Equal(
+				t, "cloud.google.com/gke-tpu-partition-2x2x2-id",
+				wg.Template.Annotations[kueuePodSetSliceRequiredTopology])
 			assert.Equal(t, "2", wg.Template.Annotations[kueuePodSetSliceSize])
 		case "tpu-group-b":
-			assert.Equal(t, "cloud.google.com/gke-tpu-partition-2x2x4-id", wg.Template.Annotations[kueuePodSetSliceRequiredTopology])
+			assert.Equal(
+				t, "cloud.google.com/gke-tpu-partition-2x2x4-id",
+				wg.Template.Annotations[kueuePodSetSliceRequiredTopology])
 			assert.Equal(t, "4", wg.Template.Annotations[kueuePodSetSliceSize])
 		case "cpu-group":
 			assert.Empty(t, wg.Template.Annotations[kueuePodSetSliceRequiredTopology],
@@ -1027,7 +1136,8 @@ func TestDynamicSlicing_SuperSlice_4x4x8(t *testing.T) {
 	assert.Len(t, workerIDs, 32, "Expected 32 unique TPU_WORKER_IDs (0..31)")
 	assert.Len(t, subBlocks, 2, "Expected 4x4x8 SuperSlice pods to span 2 4x4x4 sub-blocks, got %v", subBlocks)
 	assert.GreaterOrEqual(t, len(nodePools), 2,
-		"Expected 4x4x8 SuperSlice pods to span 2 nodepools without synthetic gke-nodepool podAffinity blocking them, got %v", nodePools)
+		"Expected 4x4x8 SuperSlice pods to span 2 nodepools without synthetic "+
+			"gke-nodepool podAffinity blocking them, got %v", nodePools)
 }
 
 // TestDynamicSlicing_RayJob_2x2x2 tests a Kueue-managed RayJob using TPU7x Dynamic Slicing
@@ -1098,7 +1208,9 @@ func TestDynamicSlicing_RayJob_2x2x2(t *testing.T) {
 
 	wgTemplate := createdJob.Spec.RayClusterSpec.WorkerGroupSpecs[0].Template
 	assert.Equal(t, gceTopologyBlockLabel, wgTemplate.Annotations[kueuePodSetRequiredTopology])
-	assert.Equal(t, "cloud.google.com/gke-tpu-partition-2x2x2-id", wgTemplate.Annotations[kueuePodSetSliceRequiredTopology])
+	assert.Equal(
+		t, "cloud.google.com/gke-tpu-partition-2x2x2-id",
+		wgTemplate.Annotations[kueuePodSetSliceRequiredTopology])
 	assert.Equal(t, "2", wgTemplate.Annotations[kueuePodSetSliceSize])
 	assertSliceHealthNodeAffinity(t, wgTemplate.Spec.Affinity, "cloud.google.com/gke-tpu-partition-2x2x2-state")
 
@@ -1112,27 +1224,29 @@ func TestDynamicSlicing_RayJob_2x2x2(t *testing.T) {
 	waitForRayJobSuccess(t, rayJob.Name, 15*time.Minute)
 
 	// 6. Verify Slice CR is released (KueueAcInUse=False) or deleted after job completion.
-	err = wait.PollUntilContextTimeout(t.Context(), 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
-		s, err := dynamicClient.Resource(sliceGVR).Get(ctx, sliceName, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		conds, _, _ := unstructured.NestedSlice(s.Object, "status", "conditions")
-		for _, c := range conds {
-			cm, ok := c.(map[string]any)
-			if !ok {
-				continue
-			}
-			if cm["type"] == sliceInUseConditionType && cm["status"] == "False" {
-				t.Logf("Slice %s released after RayJob completion (KueueAcInUse=False)", sliceName)
+	err = wait.PollUntilContextTimeout(
+		t.Context(), 5*time.Second, 3*time.Minute, true,
+		func(ctx context.Context) (bool, error) {
+			s, err := dynamicClient.Resource(sliceGVR).Get(ctx, sliceName, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
 				return true, nil
 			}
-		}
-		return false, nil
-	})
+			if err != nil {
+				return false, err
+			}
+			conds, _, _ := unstructured.NestedSlice(s.Object, "status", "conditions")
+			for _, c := range conds {
+				cm, ok := c.(map[string]any)
+				if !ok {
+					continue
+				}
+				if cm["type"] == sliceInUseConditionType && cm["status"] == "False" {
+					t.Logf("Slice %s released after RayJob completion (KueueAcInUse=False)", sliceName)
+					return true, nil
+				}
+			}
+			return false, nil
+		})
 	assert.NoError(t, err, "Expected Slice %s to be deleted or marked KueueAcInUse=False after RayJob finished", sliceName)
 }
 

@@ -68,10 +68,6 @@ const (
 
 	// Validation error substrings.
 	errTopologyMismatch = "Number of workers in worker group not equal to specified topology"
-
-	// GKE Slice CR annotations.
-	sliceOwnerWorkloadNameAnnotation      = "accelerator.gke.io/owner-workload-name"
-	sliceOwnerWorkloadNamespaceAnnotation = "accelerator.gke.io/owner-workload-namespace"
 )
 
 var (
@@ -84,16 +80,6 @@ var (
 		Group:    "ray.io",
 		Version:  "v1",
 		Resource: "rayjobs",
-	}
-	workloadGVR = schema.GroupVersionResource{
-		Group:    "kueue.x-k8s.io",
-		Version:  "v1beta2",
-		Resource: "workloads",
-	}
-	sliceGVR = schema.GroupVersionResource{
-		Group:    "accelerator.gke.io",
-		Version:  "v1beta1",
-		Resource: "slices",
 	}
 )
 
@@ -203,86 +189,6 @@ func deletePodsConcurrently(t *testing.T, pods []corev1.Pod) {
 	wg.Wait()
 	if t.Failed() {
 		t.FailNow()
-	}
-}
-
-// waitForClusterCleanup waits until the RayCluster/RayJob, its Pods, its Kueue Workload,
-// and any active Slice CRs owned by it are completely removed from the cluster.
-func waitForClusterCleanup(t *testing.T, ownerKind, ownerName string) {
-	t.Helper()
-	waitForClusterCleanupWithContext(t.Context(), t, ownerKind, ownerName)
-}
-
-func waitForClusterCleanupWithContext(ctx context.Context, t *testing.T, ownerKind, ownerName string) {
-	t.Helper()
-	err := wait.PollUntilContextTimeout(ctx, 3*time.Second, 4*time.Minute, true, func(ctx context.Context) (bool, error) {
-		// 1. Check owner object is gone.
-		gvr := rayClusterGVR
-		if ownerKind == "RayJob" {
-			gvr = rayJobGVR
-		}
-		_, err := dynamicClient.Resource(gvr).Namespace(testNamespace).Get(ctx, ownerName, metav1.GetOptions{})
-		if err == nil {
-			return false, nil
-		}
-		if !apierrors.IsNotFound(err) {
-			return false, err
-		}
-
-		// 2. Check pods in testNamespace for this cluster prefix are gone.
-		pods, err := clientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return false, err
-		}
-		for _, p := range pods.Items {
-			clusterLabel := p.Labels[utils.RayClusterLabelKey]
-			if clusterLabel == ownerName || strings.HasPrefix(clusterLabel, ownerName+"-") || strings.HasPrefix(p.Name, ownerName+"-") {
-				return false, nil
-			}
-		}
-
-		// 3. Check Kueue Workloads owned by this object are gone.
-		wls, err := dynamicClient.Resource(workloadGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			if !apierrors.IsNotFound(err) {
-				return false, err
-			}
-		} else {
-			for _, wl := range wls.Items {
-				for _, ref := range wl.GetOwnerReferences() {
-					if ref.Kind == ownerKind && ref.Name == ownerName {
-						return false, nil
-					}
-				}
-			}
-		}
-
-		// 4. Check Slice CRs (accelerator.gke.io/v1beta1) owned by this object are gone.
-		slices, err := dynamicClient.Resource(sliceGVR).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			if !apierrors.IsNotFound(err) {
-				return false, err
-			}
-		} else {
-			for _, s := range slices.Items {
-				annotations := s.GetAnnotations()
-				if annotations != nil {
-					ownerWl := annotations[sliceOwnerWorkloadNameAnnotation]
-					if ownerWl == ownerName ||
-						strings.HasPrefix(ownerWl, ownerName+"-") ||
-						strings.HasPrefix(ownerWl, "raycluster-"+ownerName) ||
-						strings.HasPrefix(ownerWl, "rayjob-"+ownerName) ||
-						strings.Contains(ownerWl, ownerName) {
-						return false, nil
-					}
-				}
-			}
-		}
-
-		return true, nil
-	})
-	if err != nil {
-		require.NoError(t, err, "cleanup wait for %s %s/%s timed out, leaking cluster resources", ownerKind, testNamespace, ownerName)
 	}
 }
 
@@ -402,13 +308,8 @@ func waitForAllPodsRunning(
 
 func triggerRayClusterReconcile(t *testing.T, clusterName string) {
 	t.Helper()
-	gvr := schema.GroupVersionResource{
-		Group:    "ray.io",
-		Version:  "v1",
-		Resource: "rayclusters",
-	}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cluster, err := dynamicClient.Resource(gvr).Namespace(testNamespace).
+		cluster, err := dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
 			Get(t.Context(), clusterName, metav1.GetOptions{})
 		if err != nil {
 			return err
@@ -421,7 +322,8 @@ func triggerRayClusterReconcile(t *testing.T, clusterName string) {
 		annotations["tpu-webhook.gke.io/reconcile-trigger"] = fmt.Sprint(time.Now().UnixNano())
 		cluster.SetAnnotations(annotations)
 
-		_, err = dynamicClient.Resource(gvr).Namespace(testNamespace).Update(t.Context(), cluster, metav1.UpdateOptions{})
+		_, err = dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+			Update(t.Context(), cluster, metav1.UpdateOptions{})
 		return err
 	})
 
@@ -494,17 +396,11 @@ func assertRayClusterRejected(t *testing.T, cluster *rayv1.RayCluster, expectedE
 		t.Fatalf("Error converting RayCluster to unstructured: %v", err)
 	}
 
-	gvr := schema.GroupVersionResource{
-		Group:    "ray.io",
-		Version:  "v1",
-		Resource: "rayclusters",
-	}
-
-	res, err := dynamicClient.Resource(gvr).Namespace(testNamespace).
+	res, err := dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
 		Create(t.Context(), &unstructured.Unstructured{Object: unstructuredObj}, metav1.CreateOptions{})
 	if err == nil {
 		t.Logf("Cleaning up leaked RayCluster %q...", res.GetName())
-		_ = dynamicClient.Resource(gvr).Namespace(testNamespace).
+		_ = dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
 			Delete(t.Context(), res.GetName(), metav1.DeleteOptions{})
 		t.Fatalf("Expected cluster creation to fail due to webhook validation, but it succeeded")
 	}
