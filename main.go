@@ -1112,9 +1112,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 	replicaIndexStr, hasReplicaLabel := pod.Labels[utils.RayWorkerReplicaIndexKey]
 	hostIndexStr, hasHostLabel := pod.Labels[utils.RayHostIndexKey]
 
-	if hasReplicaLabel && hasHostLabel {
+	if hasReplicaLabel && (hasHostLabel || numOfHosts <= 1) {
 		// In KubeRay v1.5, Pod indexing is performed by RayCluster controller when RayMultiHostIndexing
-		// feature is enabled.
+		// feature is enabled. For single-host workers (numOfHosts <= 1), KubeRay sets
+		// ray.io/worker-group-replica-index and omits ray.io/replica-host-index.
 		klog.V(1).InfoS("mutatePod", "Found Ray indexing labels for KubeRay Pod", pod.Name)
 
 		var err error
@@ -1123,9 +1124,13 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			return nil, fmt.Errorf("failed to parse replica index label: %w", err)
 		}
 
-		tpuWorkerID, err = strconv.Atoi(hostIndexStr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse host index label: %w", err)
+		if hasHostLabel {
+			tpuWorkerID, err = strconv.Atoi(hostIndexStr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse host index label: %w", err)
+			}
+		} else {
+			tpuWorkerID = 0
 		}
 	} else {
 		// Fallback for older KubeRay versions that do not set K8s index labels.
@@ -1247,10 +1252,10 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			// inject TPU_WORKER_ID
 			valWorkerID, envIdx, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 			expectedID := fmt.Sprint(finalWorkerID)
-			isDefault := valWorkerID == fmt.Sprint(tpuContainerIndex)
+			isDefault := valWorkerID == "0" || valWorkerID == fmt.Sprint(tpuContainerIndex)
 
 			if valWorkerID == "" || (isDefault && valWorkerID != expectedID) {
-				// Overwrite ID if set incorrectly by user, or set to default erroneously in a multi-host env.
+				// Overwrite ID if unset, or if set to default erroneously in a multi-host or multi-container env.
 				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_WORKER_ID", finalWorkerID, "Replica Index", replicaIndex)
 				workerID := corev1.EnvVar{
 					Name:  "TPU_WORKER_ID",
@@ -1437,6 +1442,12 @@ func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 		return false, errors.New("Ray Pod created by KubeRay missing RayCluster label")
 	}
 	namespace := pod.Namespace
+	numTpuContainers := 0
+	for _, container := range pod.Spec.Containers {
+		if containerRequestingTPUs(container) {
+			numTpuContainers++
+		}
+	}
 	for _, container := range pod.Spec.Containers {
 		if !containerRequestingTPUs(container) {
 			// Skip to the next container.
@@ -1447,12 +1458,16 @@ func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 			// TPU pod container was not intercepted by the webhook.
 			continue
 		}
+		workerID, err := strconv.Atoi(tpuWorkerID)
+		if err != nil {
+			return false, fmt.Errorf("failed to parse TPU_WORKER_ID: %w", err)
+		}
 
-		// The pod has a TPU-configured container. Inform the cache control
-		// mechanism of the pod id. It's sufficient return after inspecting the
-		// first TPU container (there can be no second TPU container with a
-		// different id).
-		uniquePodID := fmt.Sprintf("%s-%s-%s-%s", namespace, clusterName, replicaIndex, tpuWorkerID)
+		// Inform the cache control mechanism of the host index that legacyAssignIndices
+		// admitted. Container 0 of a v7x multi-container Pod holds hostIndex*numTpuContainers,
+		// mirroring getSliceToTPUHosts.
+		hostIndex := workerID / numTpuContainers
+		uniquePodID := fmt.Sprintf("%s-%s-%s-%d", namespace, clusterName, replicaIndex, hostIndex)
 		return t.cacheCond.Signal(uniquePodID), nil
 	}
 	return false, nil
