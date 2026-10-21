@@ -36,7 +36,6 @@ import (
 )
 
 var (
-	kubeconfig    *string
 	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
 	restConfig    *rest.Config
@@ -57,10 +56,6 @@ const (
 	megascaleSliceIDEnv            = "MEGASCALE_SLICE_ID"
 	megascaleCoordinatorAddressEnv = "MEGASCALE_COORDINATOR_ADDRESS"
 	megascalePortEnv               = "MEGASCALE_PORT"
-
-	// GKE TPU-specific labels.
-	replicaIndexLabelKey       = "ray.io/worker-group-replica-index"
-	legacyReplicaIndexLabelKey = "replicaIndex"
 
 	// Ray-specific labels.
 	rayNodeTypeWorker = string(rayv1.WorkerNode)
@@ -85,13 +80,7 @@ var (
 
 func init() {
 	if flag.Lookup("kubeconfig") == nil {
-		if home := os.Getenv("HOME"); home != "" {
-			kubeconfig = flag.String("kubeconfig",
-				filepath.Join(home, ".kube", "config"),
-				"(optional) absolute path to the kubeconfig file")
-		} else {
-			kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-		}
+		flag.String("kubeconfig", "", "(optional) absolute path to the kubeconfig file")
 	}
 }
 
@@ -243,20 +232,6 @@ func execCommandInPod(t *testing.T, podName string, containerName string, cmd []
 		Stderr: &stderr,
 	})
 	return stdout.String(), stderr.String(), err
-}
-
-func writeLocalFileToPod(t *testing.T, podName string, containerName string, localPath string, remotePath string) {
-	t.Helper()
-	content, err := os.ReadFile(localPath)
-	if err != nil {
-		t.Fatalf("Failed to read local file %s: %v", localPath, err)
-	}
-	t.Logf("Writing local file %s to %s in pod %s...", localPath, remotePath, podName)
-	cmd := []string{"bash", "-c", "cat << 'EOF' > " + remotePath + "\n" + string(content) + "\nEOF\n"}
-	stdout, stderr, err := execCommandInPod(t, podName, containerName, cmd)
-	if err != nil {
-		t.Fatalf("Failed to write file %s to pod: %v (stdout: %q, stderr: %q)", remotePath, err, stdout, stderr)
-	}
 }
 
 func waitForAllPodsRunning(

@@ -30,13 +30,10 @@ spec:
       template:
         spec:
           containers:
-          - image: vllm/vllm-tpu:nightly
+          - image: vllm/vllm-tpu:v0.28.0
             imagePullPolicy: Always
             name: ray-head
-            command: ["pip install protobuf==4.25.3"]
             env:
-            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
-              value: python
             - name: PYTHONPATH
               value: /app
             - name: HF_TOKEN
@@ -78,13 +75,10 @@ spec:
       template:
         spec:
           containers:
-          - image: vllm/vllm-tpu:nightly
+          - image: vllm/vllm-tpu:v0.28.0
             imagePullPolicy: Always
             name: ray-worker
-            command: ["pip install protobuf==4.25.3"]
             env:
-            - name: PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION
-              value: python
             - name: PYTHONPATH
               value: /app
             - name: HF_TOKEN

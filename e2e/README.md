@@ -71,10 +71,10 @@ kubectl apply -f e2e/manifests/v6e/v6e-16-multi-slice.yaml -n test-namespace
 kubectl apply -f e2e/manifests/v6e/heterogeneous-cluster.yaml -n test-namespace
 
 # For V7x TPUs:
-kubectl apply -f e2e/manifests/v7x/v7x-8-single-host.yaml -n test-namespace
-kubectl apply -f e2e/manifests/v7x/v7x-16-multi-host.yaml -n test-namespace
-kubectl apply -f e2e/manifests/v7x/v7x-16-multi-slice.yaml -n test-namespace
-kubectl apply -f e2e/manifests/v7x/v7x-multi-container.yaml -n test-namespace
+kubectl apply -f e2e/manifests/tpu7x/tpu7x-8-single-host.yaml -n test-namespace
+kubectl apply -f e2e/manifests/tpu7x/tpu7x-16-multi-host.yaml -n test-namespace
+kubectl apply -f e2e/manifests/tpu7x/tpu7x-16-multi-slice.yaml -n test-namespace
+kubectl apply -f e2e/manifests/tpu7x/tpu7x-multi-container.yaml -n test-namespace
 ```
 
 ### 2. Run Assertions
@@ -90,7 +90,7 @@ Or target specific test groups and scenarios directly:
 cd e2e/webhook
 
 # Validation, Single-Host, & Multi-Container E2E tests (Group 1)
-go test -v -run "TestWebhookMutation_V6eSingleHost|TestRayClusterValidation|TestWebhookMutation_HeterogeneousCluster|TestWebhookMutation_V7xSingleHost|TestWebhookMutation_V7xMultiContainer"
+go test -v -run "TestWebhookMutation_V6eSingleHost|TestWebhookMutation_TorchTpuEnvs|TestRayClusterValidation|TestWebhookMutation_HeterogeneousCluster|TestWebhookMutation_V7xSingleHost|TestWebhookMutation_V7xMultiContainer"
 
 # Multi-Host, DNS, & Pod Churn E2E tests (Group 2)
 go test -v -run "TestWebhookMutation_V6eMultiHost|TestWebhookMutation_V6ePodChurnSingleSlice|TestWebhookMutation_V6eDNSResolution|TestWebhookMutation_V7xMultiHost"

@@ -5,6 +5,7 @@ package webhook
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
+
+const (
+	// GKE TPU-specific labels.
+	replicaIndexLabelKey       = "ray.io/worker-group-replica-index"
+	legacyReplicaIndexLabelKey = "replicaIndex"
+)
+
+func writeLocalFileToPod(t *testing.T, podName string, containerName string, localPath string, remotePath string) {
+	t.Helper()
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("Failed to read local file %s: %v", localPath, err)
+	}
+	t.Logf("Writing local file %s to %s in pod %s...", localPath, remotePath, podName)
+	cmd := []string{"bash", "-c", "cat << 'EOF' > " + remotePath + "\n" + string(content) + "\nEOF\n"}
+	stdout, stderr, err := execCommandInPod(t, podName, containerName, cmd)
+	if err != nil {
+		t.Fatalf("Failed to write file %s to pod: %v (stdout: %q, stderr: %q)", remotePath, err, stdout, stderr)
+	}
+}
 
 func TestWebhookMutation_V6eSingleHost(t *testing.T) {
 	rayCluster := loadManifest(t, "../manifests/v6e/v6e-8-single-host.yaml")
@@ -447,6 +468,19 @@ func TestWebhookMutation_V7xMultiContainer(t *testing.T) {
 			envVars1 := pod.Spec.Containers[1].Env
 			assert.Equal(t, "1", envVarValue(envVars1, tpuWorkerIDEnv), "Container 1 "+tpuWorkerIDEnv+" is incorrect")
 			assert.Equal(t, "8472", envVarValue(envVars1, tpuProcessPortEnv), "Container 1 "+tpuProcessPortEnv+" is incorrect")
+
+			// Both containers share the same non-empty TPU_NAME and have no duplicate env vars
+			tpuName0 := envVarValue(envVars0, tpuNameEnv)
+			tpuName1 := envVarValue(envVars1, tpuNameEnv)
+			assert.NotEmpty(t, tpuName0, "Container 0 "+tpuNameEnv+" should not be empty")
+			assert.Equal(t, tpuName0, tpuName1, "Containers in the same Pod should share "+tpuNameEnv)
+			for idx, c := range pod.Spec.Containers {
+				seen := make(map[string]bool, len(c.Env))
+				for _, e := range c.Env {
+					assert.False(t, seen[e.Name], "Container %d has duplicate env var %s", idx, e.Name)
+					seen[e.Name] = true
+				}
+			}
 		}
 	}
 	assert.True(t, foundWorker, "No worker pods found to validate in V7x multi-container topology")

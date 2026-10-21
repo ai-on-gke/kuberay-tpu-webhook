@@ -161,6 +161,7 @@ func getTestPods(templatePod *corev1.Pod, clusterName string, namespace string, 
 	for i := 0; i < numPods; i++ {
 		templatePodCopy := templatePod.DeepCopy()
 		templatePodCopy.Name = fmt.Sprintf("%s-%d", templatePod.Name, i)
+		templatePodCopy.Labels[utils.RayNodeTypeLabelKey] = string(rayv1.WorkerNode)
 		testPods = append(testPods, templatePodCopy)
 	}
 	return testPods
@@ -587,8 +588,10 @@ func Test_GetNextWorkerID(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			workerID, err := getNextWorkerID(tc.sliceToTPUHosts, tc.podSlice, "test-namespace", tc.replicaIndex)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
 			}
 			assert.Equal(t, tc.expectedTPUWorkerID, workerID)
 		})
@@ -619,11 +622,14 @@ func Test_ContainerRequestingTPUs(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			testPods := getTestPods(tc.testPod, "test-cluster", "test-namespace", tc.numPods)
+			workerPodsChecked := 0
 			for _, pod := range testPods {
 				if pod.Labels[utils.RayNodeTypeLabelKey] == string(rayv1.WorkerNode) {
+					workerPodsChecked++
 					assert.Equal(t, tc.requestsTPUs, containerRequestingTPUs(pod.Spec.Containers...))
 				}
 			}
+			assert.Equal(t, tc.numPods, workerPodsChecked)
 		})
 	}
 }
@@ -677,11 +683,11 @@ func Test_GetNumTPUHostsFromTopology(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			vms, err := getNumTPUHostsFromTopology("test-cluster", "test-group", "test-namespace", tc.topology, tc.chipsPerHost)
-			if err == nil {
-				assert.Equal(t, tc.expectedHosts, vms)
-			}
-			if tc.topology == "" {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expectedHosts, vms)
 			}
 		})
 	}
@@ -791,9 +797,10 @@ func Test_ExtractPod(t *testing.T) {
 			admissionReview.Request.Kind.Kind = tc.expectedKind
 
 			actualPod, err := extractPod(admissionReview)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				// jsons don't match exactly after marshal -> unmarshal so just check fields
 				assert.Equal(t, tc.testPod.Name, actualPod.Name)
 				assert.Equal(t, tc.testPod.Namespace, actualPod.Namespace)
@@ -834,9 +841,10 @@ func Test_ExtractRayCluster(t *testing.T) {
 			admissionReview.Request.Kind.Kind = tc.expectedKind
 
 			actualRayCluster, err := extractRayCluster(admissionReview)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				// jsons don't match exactly after marshal -> unmarshal so just check fields
 				assert.Equal(t, tc.testRayCluster.Name, actualRayCluster.Name)
 				// assert.Equal(t, tc.testRayCluster.Spec.WorkerGroupSpecs, actualRayCluster.Spec.WorkerGroupSpecs)
@@ -894,9 +902,10 @@ func Test_GenDNSHostnames(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			hostnames, err := genDNSHostnames(tc.numOfHosts, "test-group", tc.clusterName, "test-namespace", tc.replicaIndex)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				assert.Equal(t, tc.expectedHostnames, hostnames)
 			}
 		})
@@ -1308,8 +1317,10 @@ func Test_CheckWorkersMatchTopology(t *testing.T) {
 
 			workersMatchTopology, err := checkWorkersMatchTopology("test-cluster", "test-namespace", *workerGroupSpec)
 
-			if tc.expectedNumOfHosts == 0 || tc.missingContainers == true || tc.expectedTopology == "" {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
 			}
 			assert.Equal(t, tc.workersMatch, workersMatchTopology)
 		})
@@ -1335,14 +1346,13 @@ func Test_ValidateRayCluster(t *testing.T) {
 	tests := map[string]struct {
 		rayCluster          *rayv1.RayCluster
 		missingWorkerGroups bool
-		expectedResponse    *admissionv1.AdmissionResponse
 		expectedAllowed     bool
 		expectedResult      *metav1.Status
 	}{
 		"validateRayCluster no workerGroupSpecs": {
 			// doesn't create any workergroups, pass-through
 			rayCluster:          getTestRayCluster("test-cluster", "test-group", "test-namespace", int32(1), 1, "0", "", "", false),
-			missingWorkerGroups: false,
+			missingWorkerGroups: true,
 			expectedAllowed:     true,
 			expectedResult: &metav1.Status{
 				Status:  "Success",
@@ -1882,7 +1892,6 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 
 	tests := map[string]struct {
 		numOfHosts              int32
-		numReplicas             int
 		podsInGroup             []*corev1.Pod
 		expectedsliceToTPUHosts map[slice][]int
 	}{
@@ -1895,14 +1904,12 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 		"getSliceToTPUHosts for with CPU pod list": {
 			// sliceToTPUHosts should return an empty mapping
 			numOfHosts:              int32(1),
-			numReplicas:             4,
 			podsInGroup:             getTestPods(testCPUWorker, "test-cluster", "test-namespace", 4),
 			expectedsliceToTPUHosts: make(map[slice][]int),
 		},
 		"getSliceToTPUHosts for with TPU pod list": {
 			// sliceToTPUHosts should be populated with TPU worker IDs
 			numOfHosts:  int32(64),
-			numReplicas: 2,
 			podsInGroup: getTestInterceptedTPUPods(testTPUWorker, 128, 2, 64),
 			expectedsliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(64)}: expectedIds,
@@ -1919,6 +1926,7 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 
 			// sliceToTPUHosts should be populated with slices and unique TPU_WORKER_IDs for each Pod
 			assert.Equal(t, err, nil)
+			assert.Len(t, sliceToTPUHosts, len(tc.expectedsliceToTPUHosts))
 			for slice, workerIDs := range sliceToTPUHosts {
 				assert.Contains(t, tc.expectedsliceToTPUHosts, slice)
 				assert.Equal(t, len(tc.expectedsliceToTPUHosts[slice]), len(workerIDs))
@@ -1943,7 +1951,8 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 	}{
 		"isLastAdmittedPod Pod missing RayCluster label": {
 			// missing Ray cluster label - returns error
-			testPod:       getTestCPUWorker("", "test-group", "test-namespace"),
+			testPod:       getTestTPUWorker("", "test-group", "test-namespace", "tpu-v6e-slice", "4x4", "4"),
+			testReplicaID: "test-group-0",
 			expectedError: errors.New("Ray Pod created by KubeRay missing RayCluster label"),
 		},
 		"isLastAdmittedPod Pod does not request TPUs": {
@@ -2016,9 +2025,10 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 			}
 
 			isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				assert.Equal(t, tc.isLastAdmitted, isLastAdmitted)
 			}
 		})
@@ -2027,21 +2037,19 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 
 func Test_MutatePod(t *testing.T) {
 	tests := map[string]struct {
-		testPod                      *corev1.Pod
-		numOfHosts                   int
-		existingPods                 int
-		existingReplicas             int
-		missingContainers            bool
-		expectedWorkerID             string
-		expectedReplicaID            int
-		expectedWorkerName           string
-		expectedHostnames            string
-		expectedReplicaLabel         string
-		expectedError                error
-		expectedDevicePluginHostAddr map[string]interface{}
-		expectedDevicePluginAddr     string
-		checkMultiSlice              bool
-		useKubeRayLabels             bool
+		testPod              *corev1.Pod
+		numOfHosts           int
+		existingPods         int
+		existingReplicas     int
+		missingContainers    bool
+		expectedWorkerID     string
+		expectedReplicaID    int
+		expectedWorkerName   string
+		expectedHostnames    string
+		expectedReplicaLabel string
+		expectedError        error
+		checkMultiSlice      bool
+		useKubeRayLabels     bool
 	}{
 		"mutatePod for CPU pod": {
 			// no TPU requested - pass through.
@@ -2067,16 +2075,14 @@ func Test_MutatePod(t *testing.T) {
 		},
 		"mutatePod in single-host TPU worker group": {
 			// requests TPUs, single-host - injects TPU_WORKER_ID, TPU_NAME and replicaIndex label
-			testPod:                      getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
-			numOfHosts:                   1,
-			existingPods:                 0,
-			existingReplicas:             0,
-			expectedWorkerID:             "0",
-			expectedReplicaID:            0,
-			expectedWorkerName:           fmt.Sprintf("%s-%d", "test-group", 0),
-			expectedReplicaLabel:         fmt.Sprintf("%s-%d", "test-group", 0),
-			expectedDevicePluginHostAddr: map[string]interface{}{"fieldRef": map[string]interface{}{"fieldPath": "status.hostIP"}},
-			expectedDevicePluginAddr:     "$(TPU_DEVICE_PLUGIN_HOST_IP):2112",
+			testPod:              getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
+			numOfHosts:           1,
+			existingPods:         0,
+			existingReplicas:     0,
+			expectedWorkerID:     "0",
+			expectedReplicaID:    0,
+			expectedWorkerName:   fmt.Sprintf("%s-%d", "test-group", 0),
+			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 0),
 		},
 		"mutatePod first Pod in multi-host TPU worker group": {
 			// requests TPUs, multi-host - injects hostname, subdomain, TPU_WORKER_ID, TPU_NAME,
@@ -2247,14 +2253,6 @@ func Test_MutatePod(t *testing.T) {
 			}
 
 			// Validate all expected patches exist.
-			// Check replicaIndex Label
-			if tc.useKubeRayLabels {
-				// In this case, we shouldn't inject a label because it's handled by KubeRay.
-				assert.Nil(t, findPatchValue("/metadata/labels/replicaIndex"), "Legacy replicaIndex label should NOT be patched.")
-			} else {
-				assert.Equal(t, tc.expectedReplicaLabel, findPatchValue("/metadata/labels/replicaIndex"))
-			}
-
 			// 1. Check Replica Label
 			if tc.useKubeRayLabels {
 				assert.Nil(t, findPatchValue("/metadata/labels/replicaIndex"), "Legacy replicaIndex label should NOT be patched in Fast Path")
@@ -2749,6 +2747,13 @@ func generateTestCertKeyPair(t *testing.T, orgName, certPath, keyPath string) {
 func TestWebhookCertReloadsOnChange(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	origCertFile, origKeyFile, origBindAddr := CertFile, KeyFile, BindAddr
+	t.Cleanup(func() {
+		CertFile = origCertFile
+		KeyFile = origKeyFile
+		BindAddr = origBindAddr
+	})
+
 	// Set webhook flags.
 	CertFile = filepath.Join(tmpDir, "tls.crt")
 	KeyFile = filepath.Join(tmpDir, "tls.key")
@@ -2844,11 +2849,9 @@ func Test_GetTPUProcessAddresses(t *testing.T) {
 
 func Test_MutatePod_V7x(t *testing.T) {
 	tests := map[string]struct {
-		numOfHosts              int32
 		customEnv               []corev1.EnvVar
 		expectedWorkerID        string
 		expectedPort            string
-		expectedLogDir          string
 		expectedMegascalePort   string
 		expectedMegascaleCoord  string
 		expectPatchForAddresses bool
@@ -2856,35 +2859,29 @@ func Test_MutatePod_V7x(t *testing.T) {
 		isMultiSlice            bool
 	}{
 		"v7x standard multi-container injection": {
-			numOfHosts:              2,
 			customEnv:               nil,
 			expectedWorkerID:        "1",
 			expectedPort:            "8472", // Base port + 1
-			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectPatchForAddresses: true,
 			expectPatchForPort:      true,
 			isMultiSlice:            false,
 		},
 		"v7x respects user-defined ports and addresses": {
-			numOfHosts: 2,
 			customEnv: []corev1.EnvVar{
 				{Name: "TPU_PROCESS_PORT", Value: "9999"},
 				{Name: "TPU_PROCESS_ADDRESSES", Value: "custom-mesh:9999"},
 			},
 			expectedWorkerID:        "1",
-			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectPatchForAddresses: false,
 			expectPatchForPort:      false,
 			isMultiSlice:            false,
 		},
 		"v7x megascale multi-slice coordination": {
-			numOfHosts: 2,
 			customEnv: []corev1.EnvVar{
 				{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
 			},
 			expectedWorkerID:        "1",
 			expectedPort:            "8472",
-			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectedMegascalePort:   "8082", // Base port + 1
 			expectedMegascaleCoord:  fmt.Sprintf("test-group-0-0.test-cluster-%s:8081", utils.HeadlessServiceSuffix),
 			expectPatchForAddresses: true,

@@ -20,8 +20,10 @@ func TestMain(m *testing.M) {
 		testNamespace = ns
 	}
 	var path string
-	if kubeconfig != nil && *kubeconfig != "" {
-		path = *kubeconfig
+	if f := flag.Lookup("kubeconfig"); f != nil && f.Value.String() != "" {
+		path = f.Value.String()
+	} else if envKubeconfig := os.Getenv("KUBECONFIG"); envKubeconfig != "" {
+		path = envKubeconfig
 	} else if home := os.Getenv("HOME"); home != "" {
 		path = filepath.Join(home, ".kube", "config")
 	}
