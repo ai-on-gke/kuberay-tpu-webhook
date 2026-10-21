@@ -103,6 +103,9 @@ const (
 
 	// Kueue and dynamic slicing annotation.
 	skipTPUWebhookCheckAnnotation = gkeLabelPrefix + "skip-tpu-webhook-check"
+
+	// GKE TPU Reference Architecture scheduler name.
+	sliceSchedulerName = "slice-scheduler"
 )
 
 // isDynamicSlicingOrKueueTASManaged returns true if the object has Kueue TAS annotations
@@ -509,10 +512,10 @@ func getGKETopologyKey(pod *corev1.Pod) string {
 // injectAffinity injects pod affinity and anti-affinity scheduling constraints using replicaIndex and cluster labels
 // to ensure TPU Pods from the same multi-host replica are co-located.
 func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, numOfHosts int, workerGroupName string, patches *[]patch) error {
-	// Skip affinity and anti-affinity injection if the pod is managed by Kueue TAS or Dynamic Slicing.
-	// Kueue TAS handles placement and assigns exact hostnames, so injecting synthetic affinity
-	// rules interferes with TAS bin-packing and multi-worker-group architectures.
-	if isDynamicSlicingOrKueueTASManaged(pod.Annotations) || hasKueueTASSchedulingGate(pod) {
+	// Skip affinity and anti-affinity injection if the pod is managed by Kueue TAS, Dynamic Slicing, or slice-scheduler.
+	// Kueue TAS and slice-scheduler handle placement and assign exact hostnames, so injecting synthetic
+	// affinity rules interferes with topology-aware bin-packing and multi-worker-group architectures.
+	if isDynamicSlicingOrKueueTASManaged(pod.Annotations) || hasKueueTASSchedulingGate(pod) || pod.Spec.SchedulerName == sliceSchedulerName {
 		return nil
 	}
 
@@ -722,11 +725,11 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 		}
 
 		// If sub-slicing is requested, ensure we can find a satisfying topology key.
-		// Skip if the cluster or worker group is managed by Kueue TAS or Dynamic Slicing.
+		// Skip if the cluster or worker group is managed by Kueue TAS, Dynamic Slicing, or slice-scheduler.
 		desiredSubslice, subsliceRequested := workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation]
 		clusterSubsliceWithKueue := isDynamicSlicingOrKueueTASManaged(raycluster.Annotations)
 		workerGroupSubsliceWithKueue := isDynamicSlicingOrKueueTASManaged(workerGroupSpec.Template.Annotations)
-		if subsliceRequested && !(clusterSubsliceWithKueue || workerGroupSubsliceWithKueue) {
+		if subsliceRequested && !(clusterSubsliceWithKueue || workerGroupSubsliceWithKueue || workerGroupSpec.Template.Spec.SchedulerName == sliceSchedulerName) {
 			warning, admitErr, err := t.checkSubsliceAffinity(workerGroupSpec, desiredSubslice)
 			if err != nil {
 				return nil, err
