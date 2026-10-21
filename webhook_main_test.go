@@ -3929,5 +3929,6 @@ func Test_SliceScheduler_MutatePod_And_Validate(t *testing.T) {
 		respRC, err := tpuWebhookServer.validateRayCluster(arRC)
 		assert.NoError(t, err)
 		assert.True(t, respRC.Allowed)
+		assert.Empty(t, respRC.Warnings)
 	})
 }
