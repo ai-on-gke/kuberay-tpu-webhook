@@ -380,17 +380,15 @@ func injectHostnames(clusterName string, hostNames string, envPath string, conta
 		Name:  "TPU_WORKER_HOSTNAMES",
 		Value: hostNames,
 	}
-	// Append hostnames patch to the current list of patches.
-	var updatedPatches []patch
-	updatedPatches, envArrayExists = addEnvVarPatch(*patches, tpuWorkerHostNames, envPath, envArrayExists)
-	*patches = updatedPatches
+	_, envIdx, _ := getEnvironmentVariable("TPU_WORKER_HOSTNAMES", container)
+	*patches, envArrayExists = setEnvVarPatch(*patches, tpuWorkerHostNames, envPath, envIdx, envArrayExists)
 
 	return envArrayExists
 }
 
 // injectTorchTpuEnvsIfNeeded injects Torch TPU environment variables into a Pod if not already set.
 func injectTorchTpuEnvsIfNeeded(hostnames string, topology string, container corev1.Container, envPath string, patches *[]patch, envArrayExists bool, tpuSupportTensorNode bool) (bool, error) {
-	if _, exists := getEnvironmentVariable("TORCH_TPU_TOPOLOGY", container); exists {
+	if _, _, exists := getEnvironmentVariable("TORCH_TPU_TOPOLOGY", container); exists {
 		return envArrayExists, nil
 	}
 
@@ -825,20 +823,17 @@ func sliceIsSubset(parent, child string) bool {
 	return true
 }
 
-// getEnvironmentVariable returns value associated with a given Container environment variable and if it exists
-func getEnvironmentVariable(varName string, container corev1.Container) (string, bool) {
+// getEnvironmentVariable returns value associated with a given Container environment variable,
+// its index in container.Env, and whether it exists
+func getEnvironmentVariable(varName string, container corev1.Container) (string, int, bool) {
 	if container.Env != nil && len(container.Env) > 0 {
-		for _, envVar := range container.Env {
-			if envVar.Name == varName {
-				if envVar.Value != "" {
-					return envVar.Value, true
-				} else if envVar.ValueFrom != nil {
-					return "", true
-				}
+		for i := len(container.Env) - 1; i >= 0; i-- {
+			if container.Env[i].Name == varName {
+				return container.Env[i].Value, i, true
 			}
 		}
 	}
-	return "", false
+	return "", -1, false
 }
 
 // getReplicaIndex returns the next lowest-index Pod Slice (worker group replica) to assign a Pod to in the RayCluster
@@ -967,7 +962,7 @@ func (t *TPUWebhookServer) getSliceToTPUHosts(clusterName string, groupName stri
 				continue
 			}
 
-			tpuWorkerIDEnvVar, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
+			tpuWorkerIDEnvVar, _, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 			if tpuWorkerIDEnvVar == "" {
 				// If the container has been admitted without a TPU_WORKER_ID, return
 				// an error as this will cause the TPU slice to fail JAX initialization.
@@ -1026,6 +1021,25 @@ func addEnvVarPatch(patches []patch, envVar corev1.EnvVar, path string, envArray
 	patches = append(patches, p)
 
 	return patches, true
+}
+
+// replaceEnvVarPatch is a helper to create a JSON patch to replace an existing environment variable in a container.
+func replaceEnvVarPatch(patches []patch, envVar corev1.EnvVar, path string, envIdx int) []patch {
+	p := patch{
+		"op":    "replace",
+		"path":  fmt.Sprintf("%s/%d", path, envIdx),
+		"value": envVar,
+	}
+	return append(patches, p)
+}
+
+// setEnvVarPatch creates a JSON patch to replace an existing environment variable if envIdx >= 0,
+// or add it to the container if envIdx < 0.
+func setEnvVarPatch(patches []patch, envVar corev1.EnvVar, path string, envIdx int, envArrayExists bool) ([]patch, bool) {
+	if envIdx >= 0 {
+		return replaceEnvVarPatch(patches, envVar, path, envIdx), true
+	}
+	return addEnvVarPatch(patches, envVar, path, envArrayExists)
 }
 
 // mutatePod returns an Admission Response after injecting TPU related fields to a given Pod
@@ -1151,28 +1165,28 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			}
 
 			// Multi-Slice variable injection logic.
-			if _, exists := getEnvironmentVariable("MEGASCALE_NUM_SLICES", container); exists {
+			if _, _, exists := getEnvironmentVariable("MEGASCALE_NUM_SLICES", container); exists {
 				// Set MEGASCALE_SLICE_ID, the index of this replica within the worker group.
 				// Multiple TPU multi-host replicas in the same worker group are assumed to be apart
 				// of a multi-slice configuration.
-				if val, _ := getEnvironmentVariable("MEGASCALE_SLICE_ID", container); val == "" {
-					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
+				if val, envIdx, _ := getEnvironmentVariable("MEGASCALE_SLICE_ID", container); val == "" {
+					patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_SLICE_ID",
 						Value: fmt.Sprint(replicaIndex),
-					}, path, isEnvInitialized)
+					}, path, envIdx, isEnvInitialized)
 				}
 
 				// Set MEGASCALE_COORDINATOR_ADDRESS, the address of worker 0 of slice 0.
-				if val, _ := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", container); val == "" {
+				if val, envIdx, _ := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", container); val == "" {
 					coordAddress := fmt.Sprintf("%s-0-0.%s", groupName, headlessServiceName)
 					if isV7x {
 						// Target container 0's port
 						coordAddress = fmt.Sprintf("%s:%d", coordAddress, megascalePortBase)
 					}
-					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
+					patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_COORDINATOR_ADDRESS",
 						Value: coordAddress,
-					}, path, isEnvInitialized)
+					}, path, envIdx, isEnvInitialized)
 				}
 
 				// Set MEGASCALE_PORT, defaulting to 8081 since 8080 is used by Ray for metrics.
@@ -1180,18 +1194,18 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 				if isV7x {
 					megascalePort = fmt.Sprint(megascalePortBase + tpuContainerIndex)
 				}
-				if val, _ := getEnvironmentVariable("MEGASCALE_PORT", container); val == "" {
-					patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
+				if val, envIdx, _ := getEnvironmentVariable("MEGASCALE_PORT", container); val == "" {
+					patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{
 						Name:  "MEGASCALE_PORT",
 						Value: megascalePort,
-					}, path, isEnvInitialized)
+					}, path, envIdx, isEnvInitialized)
 				}
 			}
 
 			hostnames := "localhost"
 			if numOfHosts > 1 {
 				// Legacy: inject TPU_WORKER_HOSTNAMES
-				hostnames, _ = getEnvironmentVariable("TPU_WORKER_HOSTNAMES", container)
+				hostnames, _, _ = getEnvironmentVariable("TPU_WORKER_HOSTNAMES", container)
 				if hostnames == "" || hostnames == "localhost" {
 					// Inject value if unset or set to default value.
 					hostnames, err = genDNSHostnames(numOfHosts, groupName, clusterName, namespace, replicaIndex)
@@ -1204,7 +1218,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 
 				if isV7x {
 					// v7x only: Inject TPU_PROCESS_ADDRESSES & TPU_PROCESS_PORT
-					val, _ := getEnvironmentVariable("TPU_PROCESS_ADDRESSES", container)
+					val, envIdx, _ := getEnvironmentVariable("TPU_PROCESS_ADDRESSES", container)
 					if val == "" || strings.Contains(val, "localhost") {
 						// Inject value if unset or set to default value.
 						processAddresses, err := getTPUProcessAddresses(numOfHosts, numTpuContainers, groupName, clusterName, replicaIndex)
@@ -1212,11 +1226,11 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 							return nil, err
 						}
 						klog.V(1).InfoS("mutatePod v7x", "RayCluster", namespace+"/"+clusterName, "TPU_PROCESS_ADDRESSES", processAddresses)
-						patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_ADDRESSES", Value: processAddresses}, path, isEnvInitialized)
+						patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_ADDRESSES", Value: processAddresses}, path, envIdx, isEnvInitialized)
 					}
 
-					if val, _ := getEnvironmentVariable("TPU_PROCESS_PORT", container); val == "" {
-						patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, isEnvInitialized)
+					if val, envIdx, _ := getEnvironmentVariable("TPU_PROCESS_PORT", container); val == "" {
+						patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{Name: "TPU_PROCESS_PORT", Value: fmt.Sprint(tpuProcessPortBase + tpuContainerIndex)}, path, envIdx, isEnvInitialized)
 					}
 				}
 			}
@@ -1228,7 +1242,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			}
 
 			// inject TPU_WORKER_ID
-			valWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
+			valWorkerID, envIdx, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 			expectedID := fmt.Sprint(finalWorkerID)
 			isDefault := valWorkerID == fmt.Sprint(tpuContainerIndex)
 
@@ -1239,20 +1253,20 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 					Name:  "TPU_WORKER_ID",
 					Value: fmt.Sprint(finalWorkerID),
 				}
-				patches, isEnvInitialized = addEnvVarPatch(patches, workerID, path, isEnvInitialized)
+				patches, isEnvInitialized = setEnvVarPatch(patches, workerID, path, envIdx, isEnvInitialized)
 			}
 			// inject TPU_NAME
-			if value, _ := getEnvironmentVariable("TPU_NAME", container); value == "" {
+			if value, envIdx, _ := getEnvironmentVariable("TPU_NAME", container); value == "" {
 				tpuNameValue := fmt.Sprintf("%s-%d", groupName, replicaIndex)
 				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_NAME", tpuNameValue, "Replica Index", replicaIndex)
-				patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
+				patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{
 					Name:  "TPU_NAME",
 					Value: tpuNameValue,
-				}, path, isEnvInitialized)
+				}, path, envIdx, isEnvInitialized)
 			}
 
 			// inject TPU_DEVICE_PLUGIN_HOST_IP. This Env Var is required for TPU_DEVICE_PLUGIN_ADDR
-			if _, exists := getEnvironmentVariable("TPU_DEVICE_PLUGIN_HOST_IP", container); !exists {
+			if _, _, exists := getEnvironmentVariable("TPU_DEVICE_PLUGIN_HOST_IP", container); !exists {
 				klog.V(1).InfoS("mutatePod, add TPU_DEVICE_PLUGIN_HOST_IP", "RayCluster", namespace+"/"+clusterName)
 				tpuDevicePluginAddr := corev1.EnvVar{
 					Name: "TPU_DEVICE_PLUGIN_HOST_IP",
@@ -1266,13 +1280,13 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			}
 
 			// inject TPU_DEVICE_PLUGIN_ADDR
-			if value, _ := getEnvironmentVariable("TPU_DEVICE_PLUGIN_ADDR", container); value == "" {
+			if value, envIdx, _ := getEnvironmentVariable("TPU_DEVICE_PLUGIN_ADDR", container); value == "" {
 				tpuDevicePluginAddrValue := "$(TPU_DEVICE_PLUGIN_HOST_IP):2112"
 				klog.V(1).InfoS("mutatePod", "RayCluster", namespace+"/"+clusterName, "TPU_DEVICE_PLUGIN_ADDR", tpuDevicePluginAddrValue)
-				patches, isEnvInitialized = addEnvVarPatch(patches, corev1.EnvVar{
+				patches, isEnvInitialized = setEnvVarPatch(patches, corev1.EnvVar{
 					Name:  "TPU_DEVICE_PLUGIN_ADDR",
 					Value: tpuDevicePluginAddrValue,
-				}, path, isEnvInitialized)
+				}, path, envIdx, isEnvInitialized)
 			}
 			tpuContainerIndex++
 		}
@@ -1425,7 +1439,7 @@ func (t *TPUWebhookServer) isLastAdmittedPod(pod *corev1.Pod) (bool, error) {
 			// Skip to the next container.
 			continue
 		}
-		tpuWorkerID, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
+		tpuWorkerID, _, _ := getEnvironmentVariable("TPU_WORKER_ID", container)
 		if tpuWorkerID == "" {
 			// TPU pod container was not intercepted by the webhook.
 			continue

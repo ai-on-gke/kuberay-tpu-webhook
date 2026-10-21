@@ -1460,54 +1460,123 @@ func Test_GetEnvironmentVariable(t *testing.T) {
 		Name:  "TPU_DEVICE_PLUGIN_ADDR",
 		Value: "$(TPU_DEVICE_PLUGIN_HOST_IP):2112",
 	}
-	podContainer.Env = []corev1.EnvVar{workerID, workerName, workerHostnames, workerDevicePluginAddr}
+	emptyVar := corev1.EnvVar{
+		Name:  "EMPTY_VAR",
+		Value: "",
+	}
+	valueFromVar := corev1.EnvVar{
+		Name: "VALUE_FROM_VAR",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "status.podIP",
+			},
+		},
+	}
+	podContainer.Env = []corev1.EnvVar{workerID, workerName, workerHostnames, workerDevicePluginAddr, emptyVar, valueFromVar}
+
+	nilEnvContainer := podContainer.DeepCopy()
+	nilEnvContainer.Env = nil
+
+	emptyEnvContainer := podContainer.DeepCopy()
+	emptyEnvContainer.Env = []corev1.EnvVar{}
+
+	dupEnvContainer := podContainer.DeepCopy()
+	dupEnvContainer.Env = []corev1.EnvVar{
+		{Name: "TPU_WORKER_ID", Value: "0"},
+		{Name: "OTHER_VAR", Value: "foo"},
+		{Name: "TPU_WORKER_ID", Value: "1"},
+	}
 
 	tests := map[string]struct {
 		variableName       string
 		container          *corev1.Container
 		expectedValue      string
+		expectedIndex      int
 		expectedValueExist bool
 	}{
+		"getEnvironmentVariable nil container.Env": {
+			variableName:       "TPU_WORKER_ID",
+			container:          nilEnvContainer,
+			expectedValue:      "",
+			expectedIndex:      -1,
+			expectedValueExist: false,
+		},
+		"getEnvironmentVariable empty slice container.Env": {
+			variableName:       "TPU_WORKER_ID",
+			container:          emptyEnvContainer,
+			expectedValue:      "",
+			expectedIndex:      -1,
+			expectedValueExist: false,
+		},
+		"getEnvironmentVariable duplicate returns last entry": {
+			variableName:       "TPU_WORKER_ID",
+			container:          dupEnvContainer,
+			expectedValue:      "1",
+			expectedIndex:      2,
+			expectedValueExist: true,
+		},
 		"getEnvironmentVariable TPU_WORKER_ID": {
 			// returns TPU_WORKER_ID env var value
-			variableName:  "TPU_WORKER_ID",
-			container:     podContainer,
-			expectedValue: "0",
+			variableName:       "TPU_WORKER_ID",
+			container:          podContainer,
+			expectedValue:      "0",
+			expectedIndex:      0,
+			expectedValueExist: true,
 		},
 		"getEnvironmentVariable TPU_NAME": {
 			// returns TPU_NAME env var value
-			variableName:  "TPU_NAME",
-			container:     podContainer,
-			expectedValue: fmt.Sprintf("%s-%d", "test-group", 0),
+			variableName:       "TPU_NAME",
+			container:          podContainer,
+			expectedValue:      fmt.Sprintf("%s-%d", "test-group", 0),
+			expectedIndex:      1,
+			expectedValueExist: true,
 		},
 		"getEnvironmentVariable TPU_WORKER_HOSTNAMES": {
 			// returns TPU_WORKER_HOSTNAMES env var value
-			variableName:  "TPU_WORKER_HOSTNAMES",
-			container:     podContainer,
-			expectedValue: fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
+			variableName:       "TPU_WORKER_HOSTNAMES",
+			container:          podContainer,
+			expectedValue:      fmt.Sprintf("%s-%d-%d.%s-%s", "test-group", 0, 0, "test-cluster", utils.HeadlessServiceSuffix),
+			expectedIndex:      2,
+			expectedValueExist: true,
 		},
 		"getEnvironmentVariable TPU_DEVICE_PLUGIN_HOST_IP": {
 			// returns TPU_DEVICE_PLUGIN_HOST_IP env var check
 			variableName:       "TPU_DEVICE_PLUGIN_HOST_IP",
 			container:          podContainer,
 			expectedValue:      "",
+			expectedIndex:      -1,
 			expectedValueExist: false,
 		},
 		"getEnvironmentVariable TPU_DEVICE_PLUGIN_ADDR": {
-			variableName:  "TPU_DEVICE_PLUGIN_ADDR",
-			container:     podContainer,
-			expectedValue: "$(TPU_DEVICE_PLUGIN_HOST_IP):2112",
+			variableName:       "TPU_DEVICE_PLUGIN_ADDR",
+			container:          podContainer,
+			expectedValue:      "$(TPU_DEVICE_PLUGIN_HOST_IP):2112",
+			expectedIndex:      3,
+			expectedValueExist: true,
+		},
+		"getEnvironmentVariable empty value": {
+			variableName:       "EMPTY_VAR",
+			container:          podContainer,
+			expectedValue:      "",
+			expectedIndex:      4,
+			expectedValueExist: true,
+		},
+		"getEnvironmentVariable valueFrom": {
+			variableName:       "VALUE_FROM_VAR",
+			container:          podContainer,
+			expectedValue:      "",
+			expectedIndex:      5,
+			expectedValueExist: true,
 		},
 	}
 
 	// validate getEnvironmentVariable returns correct env var value from Pod container
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			varValue, exists := getEnvironmentVariable(tc.variableName, *tc.container)
+			varValue, varIndex, exists := getEnvironmentVariable(tc.variableName, *tc.container)
 			assert.Equal(t, tc.expectedValue, varValue)
-			if tc.expectedValueExist {
-				assert.True(t, exists)
-			}
+			assert.Equal(t, tc.expectedIndex, varIndex)
+			assert.Equal(t, tc.expectedValueExist, exists)
 		})
 	}
 }
@@ -3094,76 +3163,29 @@ func TestMutatePodLoad(t *testing.T) {
 	})
 }
 
-// applyPatches is a crude way to apply JSON patches for testing purposes
+// applyPatches applies JSON patches to a Pod object using RFC 6902 json-patch.
 func applyPatches(t *testing.T, pod *corev1.Pod, patchBytes []byte) *corev1.Pod {
 	if len(patchBytes) == 0 {
 		return pod
 	}
-	var patches []patch
-	err := json.Unmarshal(patchBytes, &patches)
+	podJSON, err := json.Marshal(pod)
 	if err != nil {
-		t.Fatalf("Failed to unmarshal patches: %v", err)
+		t.Fatalf("Failed to marshal pod: %v", err)
 	}
-
-	patchedPod := pod.DeepCopy()
-	for _, p := range patches {
-		op := p["op"].(string)
-		path := p["path"].(string)
-		value := p["value"]
-
-		if op == "add" || op == "replace" {
-			if path == "/metadata/labels/replicaIndex" {
-				if patchedPod.Labels == nil {
-					patchedPod.Labels = make(map[string]string)
-				}
-				patchedPod.Labels[legacyReplicaIndexLabelKey] = value.(string)
-			} else if path == "/spec/hostname" {
-				patchedPod.Spec.Hostname = value.(string)
-			} else if path == "/spec/subdomain" {
-				patchedPod.Spec.Subdomain = value.(string)
-			} else if path == "/spec/containers/0/env" {
-				// This is a bit complex as it can be adding to an existing list or creating a new one
-				// In our case, we know it's adding or replacing.
-				// For simplicity in this test, we'll just handle the case where it's a list of env vars.
-				if envs, ok := value.([]any); ok {
-					for _, e := range envs {
-						eMap := e.(map[string]any)
-						name := eMap["name"].(string)
-						var value string
-						if v, ok := eMap["value"]; ok && v != nil {
-							value = v.(string)
-						}
-						patchedPod.Spec.Containers[0].Env = append(patchedPod.Spec.Containers[0].Env, corev1.EnvVar{
-							Name:  name,
-							Value: value,
-						})
-					}
-				} else if env, ok := value.(map[string]any); ok {
-					name := env["name"].(string)
-					var value string
-					if v, ok := env["value"]; ok && v != nil {
-						value = v.(string)
-					}
-					patchedPod.Spec.Containers[0].Env = append(patchedPod.Spec.Containers[0].Env, corev1.EnvVar{
-						Name:  name,
-						Value: value,
-					})
-				}
-			} else if path == "/spec/containers/0/env/-" {
-				eMap := value.(map[string]any)
-				name := eMap["name"].(string)
-				var valStr string
-				if v, ok := eMap["value"]; ok && v != nil {
-					valStr = v.(string)
-				}
-				patchedPod.Spec.Containers[0].Env = append(patchedPod.Spec.Containers[0].Env, corev1.EnvVar{
-					Name:  name,
-					Value: valStr,
-				})
-			}
-		}
+	patch, err := jsonpatch.DecodePatch(patchBytes)
+	if err != nil {
+		t.Fatalf("Failed to decode patch: %v", err)
 	}
-	return patchedPod
+	patchedJSON, err := patch.Apply(podJSON)
+	if err != nil {
+		t.Fatalf("Failed to apply patch: %v", err)
+	}
+	var patchedPod corev1.Pod
+	err = json.Unmarshal(patchedJSON, &patchedPod)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal patched pod: %v", err)
+	}
+	return &patchedPod
 }
 
 func TestSliceIsSubset(t *testing.T) {
@@ -3216,4 +3238,621 @@ func TestSliceIsSubset(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func Test_ReplaceEnvVarPatch(t *testing.T) {
+	patches := []patch{}
+	envVar := corev1.EnvVar{Name: "FOO", Value: "bar"}
+	patches = replaceEnvVarPatch(patches, envVar, "/spec/containers/0/env", 2)
+	assert.Len(t, patches, 1)
+	assert.Equal(t, "replace", patches[0]["op"])
+	assert.Equal(t, "/spec/containers/0/env/2", patches[0]["path"])
+	assert.Equal(t, envVar, patches[0]["value"])
+}
+
+func Test_SetEnvVarPatch(t *testing.T) {
+	envVar := corev1.EnvVar{Name: "FOO", Value: "bar"}
+
+	t.Run("replace existing index", func(t *testing.T) {
+		patches, exists := setEnvVarPatch([]patch{}, envVar, "/spec/containers/0/env", 3, true)
+		assert.True(t, exists)
+		assert.Len(t, patches, 1)
+		assert.Equal(t, "replace", patches[0]["op"])
+		assert.Equal(t, "/spec/containers/0/env/3", patches[0]["path"])
+		assert.Equal(t, envVar, patches[0]["value"])
+	})
+
+	t.Run("add to existing array", func(t *testing.T) {
+		patches, exists := setEnvVarPatch([]patch{}, envVar, "/spec/containers/0/env", -1, true)
+		assert.True(t, exists)
+		assert.Len(t, patches, 1)
+		assert.Equal(t, "add", patches[0]["op"])
+		assert.Equal(t, "/spec/containers/0/env/-", patches[0]["path"])
+		assert.Equal(t, envVar, patches[0]["value"])
+	})
+
+	t.Run("add to uninitialized array", func(t *testing.T) {
+		patches, exists := setEnvVarPatch([]patch{}, envVar, "/spec/containers/0/env", -1, false)
+		assert.True(t, exists)
+		assert.Len(t, patches, 1)
+		assert.Equal(t, "add", patches[0]["op"])
+		assert.Equal(t, "/spec/containers/0/env", patches[0]["path"])
+		assert.Equal(t, []corev1.EnvVar{envVar}, patches[0]["value"])
+	})
+}
+
+func Test_InjectHostnames_ReplaceExisting(t *testing.T) {
+	container := corev1.Container{
+		Env: []corev1.EnvVar{
+			{Name: "OTHER", Value: "val"},
+			{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+		},
+	}
+	var patches []patch
+	exists := injectHostnames("test-cluster", "host-0,host-1", "/spec/containers/0/env", container, &patches, true)
+	assert.True(t, exists)
+	assert.Len(t, patches, 1)
+	assert.Equal(t, "replace", patches[0]["op"])
+	assert.Equal(t, "/spec/containers/0/env/1", patches[0]["path"])
+	assert.Equal(t, corev1.EnvVar{Name: "TPU_WORKER_HOSTNAMES", Value: "host-0,host-1"}, patches[0]["value"])
+}
+
+func Test_MutatePod_TPU7x_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
+	// Simulate GKE 1.37+ admission order where warden-mutating runs before kuberay-tpu-webhook
+	// and pre-populates default single-host env vars on a multi-host tpu7x Pod (worker ID 1).
+	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x2", "4")
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+	pod.Labels[utils.RayHostIndexKey] = "1"
+
+	// Pre-populate container.Env with warden-mutating defaults and existing app env vars.
+	pod.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "APP_ENV_A", Value: "alpha"},
+		{Name: "TPU_WORKER_ID", Value: "0"},
+		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+		{Name: "APP_ENV_B", Value: "beta"},
+	}
+
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	testPodLister := setupInformer()
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.NotNil(t, admissionResponse)
+	assert.True(t, admissionResponse.Allowed)
+
+	var patches []patch
+	err = json.Unmarshal(admissionResponse.Patch, &patches)
+	assert.NoError(t, err)
+
+	// Check each patch on container 0:
+	// TPU_WORKER_ID should be a "replace" patch at /spec/containers/0/env/1
+	// TPU_WORKER_HOSTNAMES should be a "replace" patch at /spec/containers/0/env/2
+	// TPU_PROCESS_ADDRESSES should be a "replace" patch at /spec/containers/0/env/3
+	// NONE of them should be appended to /spec/containers/0/env/-
+	foundWorkerIDReplace := false
+	foundHostnamesReplace := false
+	foundAddressesReplace := false
+
+	for _, p := range patches {
+		path := p["path"].(string)
+		op := p["op"].(string)
+
+		if valMap, ok := p["value"].(map[string]interface{}); ok {
+			name := valMap["name"]
+			if name == "TPU_WORKER_ID" {
+				if op == "replace" && path == "/spec/containers/0/env/1" {
+					foundWorkerIDReplace = true
+					assert.Equal(t, "1", valMap["value"])
+				}
+				assert.NotEqual(t, "/spec/containers/0/env/-", path, "TPU_WORKER_ID should NOT be appended to /env/-")
+			}
+			if name == "TPU_WORKER_HOSTNAMES" {
+				if op == "replace" && path == "/spec/containers/0/env/2" {
+					foundHostnamesReplace = true
+					assert.NotEqual(t, "localhost", valMap["value"])
+				}
+				assert.NotEqual(t, "/spec/containers/0/env/-", path, "TPU_WORKER_HOSTNAMES should NOT be appended to /env/-")
+			}
+			if name == "TPU_PROCESS_ADDRESSES" {
+				if op == "replace" && path == "/spec/containers/0/env/3" {
+					foundAddressesReplace = true
+					assert.NotEqual(t, "localhost:8471", valMap["value"])
+				}
+				assert.NotEqual(t, "/spec/containers/0/env/-", path, "TPU_PROCESS_ADDRESSES should NOT be appended to /env/-")
+			}
+		}
+	}
+
+	assert.True(t, foundWorkerIDReplace, "Expected TPU_WORKER_ID replace patch at /spec/containers/0/env/1")
+	assert.True(t, foundHostnamesReplace, "Expected TPU_WORKER_HOSTNAMES replace patch at /spec/containers/0/env/2")
+	assert.True(t, foundAddressesReplace, "Expected TPU_PROCESS_ADDRESSES replace patch at /spec/containers/0/env/3")
+
+	// Apply patches and verify that no duplicate env vars exist in the resulting container.Env
+	patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+	envVarCounts := make(map[string]int)
+	for _, envVar := range patchedPod.Spec.Containers[0].Env {
+		envVarCounts[envVar.Name]++
+	}
+
+	for envName, count := range envVarCounts {
+		assert.Equal(t, 1, count, "EnvVar %s appears %d times in container.Env, expected exactly 1", envName, count)
+	}
+
+	// Verify the values
+	for _, envVar := range patchedPod.Spec.Containers[0].Env {
+		switch envVar.Name {
+		case "TPU_WORKER_ID":
+			assert.Equal(t, "1", envVar.Value)
+		case "TPU_WORKER_HOSTNAMES":
+			assert.Contains(t, envVar.Value, "test-group-0-0")
+			assert.NotEqual(t, "localhost", envVar.Value)
+		case "TPU_PROCESS_ADDRESSES":
+			assert.Contains(t, envVar.Value, "test-group-0-0.")
+			assert.Contains(t, envVar.Value, ":8471")
+			assert.NotEqual(t, "localhost:8471", envVar.Value)
+		case "APP_ENV_A":
+			assert.Equal(t, "alpha", envVar.Value)
+		case "APP_ENV_B":
+			assert.Equal(t, "beta", envVar.Value)
+		}
+	}
+}
+
+func Test_MutatePod_TPU7x_MultiContainer_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
+	// Simulate GKE 1.37+ admission order on a multi-container Ironwood TPU pod (2 TPU containers).
+	// Host index 1 means container 0 gets worker ID 2 (1*2 + 0) and container 1 gets worker ID 3 (1*2 + 1).
+	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x2", "2")
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+	pod.Labels[utils.RayHostIndexKey] = "1"
+
+	// Container 0 pre-populated by warden-mutating:
+	pod.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "APP_ENV", Value: "worker-1"},
+		{Name: "TPU_WORKER_ID", Value: "0"},
+		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+	}
+
+	// Add second container requesting TPU, pre-populated by warden-mutating:
+	secondContainer := pod.Spec.Containers[0].DeepCopy()
+	secondContainer.Name = "ray-worker-container-2"
+	secondContainer.Env = []corev1.EnvVar{
+		{Name: "APP_ENV", Value: "worker-2"},
+		{Name: "TPU_WORKER_ID", Value: "1"}, // warden assigns 1 to container 1
+		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+	}
+	pod.Spec.Containers = append(pod.Spec.Containers, *secondContainer)
+
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	testPodLister := setupInformer()
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.NotNil(t, admissionResponse)
+	assert.True(t, admissionResponse.Allowed)
+
+	patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+
+	// Check Container 0
+	counts0 := make(map[string]int)
+	for _, env := range patchedPod.Spec.Containers[0].Env {
+		counts0[env.Name]++
+	}
+	for envName, count := range counts0 {
+		assert.Equal(t, 1, count, "Container 0: EnvVar %s appears %d times, expected exactly 1", envName, count)
+	}
+	val0, _, exists0 := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[0])
+	assert.True(t, exists0)
+	assert.Equal(t, "2", val0)
+
+	// Check Container 1
+	counts1 := make(map[string]int)
+	for _, env := range patchedPod.Spec.Containers[1].Env {
+		counts1[env.Name]++
+	}
+	for envName, count := range counts1 {
+		assert.Equal(t, 1, count, "Container 1: EnvVar %s appears %d times, expected exactly 1", envName, count)
+	}
+	val1, _, exists1 := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[1])
+	assert.True(t, exists1)
+	assert.Equal(t, "3", val1)
+}
+
+func Test_MutatePod_TPU7x_SingleHost_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
+	// Single host TPU worker (1 host).
+	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x1", "4")
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+	pod.Labels[utils.RayHostIndexKey] = "0"
+
+	pod.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "TPU_WORKER_ID", Value: "0"},
+		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+	}
+
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	testPodLister := setupInformer()
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.NotNil(t, admissionResponse)
+
+	patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+	counts := make(map[string]int)
+	for _, env := range patchedPod.Spec.Containers[0].Env {
+		counts[env.Name]++
+	}
+	for envName, count := range counts {
+		assert.Equal(t, 1, count, "Single-host: EnvVar %s appears %d times, expected exactly 1", envName, count)
+	}
+	valID, _, _ := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[0])
+	assert.Equal(t, "0", valID)
+}
+
+func Test_MutatePod_NonV7x_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
+	testCases := []struct {
+		name        string
+		accelerator string
+		topology    string
+		tpuResource string
+	}{
+		{
+			name:        "v4",
+			accelerator: "tpu-v4-podslice",
+			topology:    "2x2x2",
+			tpuResource: "4",
+		},
+		{
+			name:        "v5e",
+			accelerator: "tpu-v5-lite-podslice",
+			topology:    "2x4",
+			tpuResource: "4",
+		},
+		{
+			name:        "v6e",
+			accelerator: "tpu-v6e-slice",
+			topology:    "2x4",
+			tpuResource: "4",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", tc.accelerator, tc.topology, tc.tpuResource)
+			if pod.Labels == nil {
+				pod.Labels = make(map[string]string)
+			}
+			pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+			pod.Labels[utils.RayHostIndexKey] = "1"
+
+			// Pre-populate container.Env with warden-mutating defaults and existing app env vars.
+			pod.Spec.Containers[0].Env = []corev1.EnvVar{
+				{Name: "APP_ENV_A", Value: "alpha"},
+				{Name: "TPU_WORKER_ID", Value: "0"},
+				{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+				{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+				{Name: "APP_ENV_B", Value: "beta"},
+			}
+
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(pod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object.Object = pod
+
+			testPodLister := setupInformer()
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+			assert.NoError(t, err)
+			assert.NotNil(t, admissionResponse)
+			assert.True(t, admissionResponse.Allowed)
+
+			var patches []patch
+			err = json.Unmarshal(admissionResponse.Patch, &patches)
+			assert.NoError(t, err)
+
+			foundWorkerIDReplace := false
+			foundHostnamesReplace := false
+
+			for _, p := range patches {
+				path := p["path"].(string)
+				op := p["op"].(string)
+
+				if valMap, ok := p["value"].(map[string]interface{}); ok {
+					name := valMap["name"]
+					if name == "TPU_WORKER_ID" {
+						if op == "replace" && path == "/spec/containers/0/env/1" {
+							foundWorkerIDReplace = true
+							assert.Equal(t, "1", valMap["value"])
+						}
+						assert.NotEqual(t, "/spec/containers/0/env/-", path, "TPU_WORKER_ID should NOT be appended to /env/-")
+					}
+					if name == "TPU_WORKER_HOSTNAMES" {
+						if op == "replace" && path == "/spec/containers/0/env/2" {
+							foundHostnamesReplace = true
+							assert.NotEqual(t, "localhost", valMap["value"])
+						}
+						assert.NotEqual(t, "/spec/containers/0/env/-", path, "TPU_WORKER_HOSTNAMES should NOT be appended to /env/-")
+					}
+				}
+			}
+
+			assert.True(t, foundWorkerIDReplace, "Expected TPU_WORKER_ID replace patch at /spec/containers/0/env/1")
+			assert.True(t, foundHostnamesReplace, "Expected TPU_WORKER_HOSTNAMES replace patch at /spec/containers/0/env/2")
+
+			patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+			envVarCounts := make(map[string]int)
+			for _, envVar := range patchedPod.Spec.Containers[0].Env {
+				envVarCounts[envVar.Name]++
+			}
+
+			for envName, count := range envVarCounts {
+				assert.Equal(t, 1, count, "EnvVar %s appears %d times in container.Env, expected exactly 1", envName, count)
+			}
+
+			for _, envVar := range patchedPod.Spec.Containers[0].Env {
+				switch envVar.Name {
+				case "TPU_WORKER_ID":
+					assert.Equal(t, "1", envVar.Value)
+				case "TPU_WORKER_HOSTNAMES":
+					assert.Contains(t, envVar.Value, "test-group-0-0")
+					assert.NotEqual(t, "localhost", envVar.Value)
+				case "APP_ENV_A":
+					assert.Equal(t, "alpha", envVar.Value)
+				case "APP_ENV_B":
+					assert.Equal(t, "beta", envVar.Value)
+				}
+			}
+		})
+	}
+}
+
+func Test_MutatePod_CustomTPUWorkerID_Preserved(t *testing.T) {
+	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
+	pod.Labels[utils.RayHostIndexKey] = "1"
+
+	// User specifies a custom non-default TPU_WORKER_ID ("42").
+	pod.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "APP_ENV", Value: "custom-app"},
+		{Name: "TPU_WORKER_ID", Value: "42"},
+		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+	}
+
+	admissionReview := getTestAdmissionReview("Pod", "CREATE")
+	jsonPod, _ := json.Marshal(pod)
+	admissionReview.Request.Object.Raw = jsonPod
+	admissionReview.Request.Object.Object = pod
+
+	testPodLister := setupInformer()
+	tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+	assert.NoError(t, err)
+	assert.NotNil(t, admissionResponse)
+	assert.True(t, admissionResponse.Allowed)
+
+	var patches []patch
+	err = json.Unmarshal(admissionResponse.Patch, &patches)
+	assert.NoError(t, err)
+
+	for _, p := range patches {
+		if valMap, ok := p["value"].(map[string]interface{}); ok {
+			assert.NotEqual(t, "TPU_WORKER_ID", valMap["name"], "Custom TPU_WORKER_ID should NOT be modified by patches")
+		}
+	}
+
+	patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+	counts := make(map[string]int)
+	for _, env := range patchedPod.Spec.Containers[0].Env {
+		counts[env.Name]++
+	}
+	for envName, count := range counts {
+		assert.Equal(t, 1, count, "EnvVar %s appears %d times, expected exactly 1", envName, count)
+	}
+
+	val, _, exists := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[0])
+	assert.True(t, exists)
+	assert.Equal(t, "42", val, "Custom TPU_WORKER_ID must be preserved")
+}
+
+func Test_MutatePod_MultiSlice_MegascaleVars_InjectionAndPreservation(t *testing.T) {
+	t.Run("injection and in-place replacement of empty placeholder", func(t *testing.T) {
+		pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		pod.Labels[utils.RayWorkerReplicaIndexKey] = "1"
+		pod.Labels[utils.RayHostIndexKey] = "0"
+
+		pod.Spec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "APP_ENV", Value: "multi-slice-app"},
+			{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
+			{Name: "MEGASCALE_SLICE_ID", Value: ""}, // empty placeholder to be replaced in-place
+		}
+
+		admissionReview := getTestAdmissionReview("Pod", "CREATE")
+		jsonPod, _ := json.Marshal(pod)
+		admissionReview.Request.Object.Raw = jsonPod
+		admissionReview.Request.Object.Object = pod
+
+		testPodLister := setupInformer()
+		tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+		admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+		assert.NoError(t, err)
+		assert.NotNil(t, admissionResponse)
+		assert.True(t, admissionResponse.Allowed)
+
+		var patches []patch
+		err = json.Unmarshal(admissionResponse.Patch, &patches)
+		assert.NoError(t, err)
+
+		foundSliceIDReplace := false
+		for _, p := range patches {
+			path := p["path"].(string)
+			op := p["op"].(string)
+			if valMap, ok := p["value"].(map[string]interface{}); ok {
+				if valMap["name"] == "MEGASCALE_SLICE_ID" {
+					if op == "replace" && path == "/spec/containers/0/env/2" {
+						foundSliceIDReplace = true
+						assert.Equal(t, "1", valMap["value"])
+					}
+				}
+			}
+		}
+		assert.True(t, foundSliceIDReplace, "Expected MEGASCALE_SLICE_ID replace patch at index 2")
+
+		patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+		counts := make(map[string]int)
+		for _, env := range patchedPod.Spec.Containers[0].Env {
+			counts[env.Name]++
+		}
+		for envName, count := range counts {
+			assert.Equal(t, 1, count, "EnvVar %s appears %d times, expected exactly 1", envName, count)
+		}
+
+		sliceID, _, exists := getEnvironmentVariable("MEGASCALE_SLICE_ID", patchedPod.Spec.Containers[0])
+		assert.True(t, exists)
+		assert.Equal(t, "1", sliceID)
+
+		coordAddr, _, exists := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", patchedPod.Spec.Containers[0])
+		assert.True(t, exists)
+		assert.Equal(t, fmt.Sprintf("test-group-0-0.test-cluster-%s", utils.HeadlessServiceSuffix), coordAddr)
+
+		port, _, exists := getEnvironmentVariable("MEGASCALE_PORT", patchedPod.Spec.Containers[0])
+		assert.True(t, exists)
+		assert.Equal(t, "8081", port)
+	})
+
+	t.Run("preservation of user-specified custom megascale vars", func(t *testing.T) {
+		pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x2", "4")
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		pod.Labels[utils.RayWorkerReplicaIndexKey] = "1"
+		pod.Labels[utils.RayHostIndexKey] = "0"
+
+		pod.Spec.Containers[0].Env = []corev1.EnvVar{
+			{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
+			{Name: "MEGASCALE_SLICE_ID", Value: "7"},
+			{Name: "MEGASCALE_COORDINATOR_ADDRESS", Value: "custom-coordinator.service:9999"},
+			{Name: "MEGASCALE_PORT", Value: "8888"},
+		}
+
+		admissionReview := getTestAdmissionReview("Pod", "CREATE")
+		jsonPod, _ := json.Marshal(pod)
+		admissionReview.Request.Object.Raw = jsonPod
+		admissionReview.Request.Object.Object = pod
+
+		testPodLister := setupInformer()
+		tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+		admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+		assert.NoError(t, err)
+		assert.NotNil(t, admissionResponse)
+		assert.True(t, admissionResponse.Allowed)
+
+		var patches []patch
+		err = json.Unmarshal(admissionResponse.Patch, &patches)
+		assert.NoError(t, err)
+
+		for _, p := range patches {
+			if valMap, ok := p["value"].(map[string]interface{}); ok {
+				name := valMap["name"]
+				assert.NotEqual(t, "MEGASCALE_SLICE_ID", name, "Custom MEGASCALE_SLICE_ID must not be modified")
+				assert.NotEqual(t, "MEGASCALE_COORDINATOR_ADDRESS", name, "Custom MEGASCALE_COORDINATOR_ADDRESS must not be modified")
+				assert.NotEqual(t, "MEGASCALE_PORT", name, "Custom MEGASCALE_PORT must not be modified")
+			}
+		}
+
+		patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+		counts := make(map[string]int)
+		for _, env := range patchedPod.Spec.Containers[0].Env {
+			counts[env.Name]++
+		}
+		for envName, count := range counts {
+			assert.Equal(t, 1, count, "EnvVar %s appears %d times, expected exactly 1", envName, count)
+		}
+
+		sliceID, _, exists := getEnvironmentVariable("MEGASCALE_SLICE_ID", patchedPod.Spec.Containers[0])
+		assert.True(t, exists)
+		assert.Equal(t, "7", sliceID)
+
+		coordAddr, _, exists := getEnvironmentVariable("MEGASCALE_COORDINATOR_ADDRESS", patchedPod.Spec.Containers[0])
+		assert.True(t, exists)
+		assert.Equal(t, "custom-coordinator.service:9999", coordAddr)
+
+		port, _, exists := getEnvironmentVariable("MEGASCALE_PORT", patchedPod.Spec.Containers[0])
+		assert.True(t, exists)
+		assert.Equal(t, "8888", port)
+	})
+}
+
+func Test_ApplyPatches_ValueFrom(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "test-container",
+					Env: []corev1.EnvVar{
+						{Name: "EXISTING", Value: "existing-val"},
+					},
+				},
+			},
+		},
+	}
+
+	patchJSON := []byte(`[
+		{
+			"op": "add",
+			"path": "/spec/containers/0/env/-",
+			"value": {
+				"name": "FIELD_REF_VAR",
+				"valueFrom": {
+					"fieldRef": {
+						"fieldPath": "status.podIP"
+					}
+				}
+			}
+		}
+	]`)
+
+	patchedPod := applyPatches(t, pod, patchJSON)
+	assert.Len(t, patchedPod.Spec.Containers[0].Env, 2)
+	envVar := patchedPod.Spec.Containers[0].Env[1]
+	assert.Equal(t, "FIELD_REF_VAR", envVar.Name)
+	assert.NotNil(t, envVar.ValueFrom)
+	assert.NotNil(t, envVar.ValueFrom.FieldRef)
+	assert.Equal(t, "status.podIP", envVar.ValueFrom.FieldRef.FieldPath)
 }
