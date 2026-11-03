@@ -1346,6 +1346,7 @@ func Test_ValidateRayCluster(t *testing.T) {
 	tests := map[string]struct {
 		rayCluster          *rayv1.RayCluster
 		missingWorkerGroups bool
+		expectedResponse    *admissionv1.AdmissionResponse
 		expectedAllowed     bool
 		expectedResult      *metav1.Status
 	}{
@@ -1892,6 +1893,7 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 
 	tests := map[string]struct {
 		numOfHosts              int32
+		numReplicas             int
 		podsInGroup             []*corev1.Pod
 		expectedsliceToTPUHosts map[slice][]int
 	}{
@@ -1904,12 +1906,14 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 		"getSliceToTPUHosts for with CPU pod list": {
 			// sliceToTPUHosts should return an empty mapping
 			numOfHosts:              int32(1),
+			numReplicas:             4,
 			podsInGroup:             getTestPods(testCPUWorker, "test-cluster", "test-namespace", 4),
 			expectedsliceToTPUHosts: make(map[slice][]int),
 		},
 		"getSliceToTPUHosts for with TPU pod list": {
 			// sliceToTPUHosts should be populated with TPU worker IDs
 			numOfHosts:  int32(64),
+			numReplicas: 2,
 			podsInGroup: getTestInterceptedTPUPods(testTPUWorker, 128, 2, 64),
 			expectedsliceToTPUHosts: map[slice][]int{
 				slice{"test-cluster", "test-group", "test-namespace", 0, int32(64)}: expectedIds,
@@ -2037,19 +2041,21 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 
 func Test_MutatePod(t *testing.T) {
 	tests := map[string]struct {
-		testPod              *corev1.Pod
-		numOfHosts           int
-		existingPods         int
-		existingReplicas     int
-		missingContainers    bool
-		expectedWorkerID     string
-		expectedReplicaID    int
-		expectedWorkerName   string
-		expectedHostnames    string
-		expectedReplicaLabel string
-		expectedError        error
-		checkMultiSlice      bool
-		useKubeRayLabels     bool
+		testPod                      *corev1.Pod
+		numOfHosts                   int
+		existingPods                 int
+		existingReplicas             int
+		missingContainers            bool
+		expectedWorkerID             string
+		expectedReplicaID            int
+		expectedWorkerName           string
+		expectedHostnames            string
+		expectedReplicaLabel         string
+		expectedError                error
+		expectedDevicePluginHostAddr map[string]interface{}
+		expectedDevicePluginAddr     string
+		checkMultiSlice              bool
+		useKubeRayLabels             bool
 	}{
 		"mutatePod for CPU pod": {
 			// no TPU requested - pass through.
@@ -2075,14 +2081,16 @@ func Test_MutatePod(t *testing.T) {
 		},
 		"mutatePod in single-host TPU worker group": {
 			// requests TPUs, single-host - injects TPU_WORKER_ID, TPU_NAME and replicaIndex label
-			testPod:              getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
-			numOfHosts:           1,
-			existingPods:         0,
-			existingReplicas:     0,
-			expectedWorkerID:     "0",
-			expectedReplicaID:    0,
-			expectedWorkerName:   fmt.Sprintf("%s-%d", "test-group", 0),
-			expectedReplicaLabel: fmt.Sprintf("%s-%d", "test-group", 0),
+			testPod:                      getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
+			numOfHosts:                   1,
+			existingPods:                 0,
+			existingReplicas:             0,
+			expectedWorkerID:             "0",
+			expectedReplicaID:            0,
+			expectedWorkerName:           fmt.Sprintf("%s-%d", "test-group", 0),
+			expectedReplicaLabel:         fmt.Sprintf("%s-%d", "test-group", 0),
+			expectedDevicePluginHostAddr: map[string]interface{}{"fieldRef": map[string]interface{}{"fieldPath": "status.hostIP"}},
+			expectedDevicePluginAddr:     "$(TPU_DEVICE_PLUGIN_HOST_IP):2112",
 		},
 		"mutatePod first Pod in multi-host TPU worker group": {
 			// requests TPUs, multi-host - injects hostname, subdomain, TPU_WORKER_ID, TPU_NAME,
@@ -2849,9 +2857,11 @@ func Test_GetTPUProcessAddresses(t *testing.T) {
 
 func Test_MutatePod_V7x(t *testing.T) {
 	tests := map[string]struct {
+		numOfHosts              int32
 		customEnv               []corev1.EnvVar
 		expectedWorkerID        string
 		expectedPort            string
+		expectedLogDir          string
 		expectedMegascalePort   string
 		expectedMegascaleCoord  string
 		expectPatchForAddresses bool
@@ -2859,29 +2869,35 @@ func Test_MutatePod_V7x(t *testing.T) {
 		isMultiSlice            bool
 	}{
 		"v7x standard multi-container injection": {
+			numOfHosts:              2,
 			customEnv:               nil,
 			expectedWorkerID:        "1",
 			expectedPort:            "8472", // Base port + 1
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectPatchForAddresses: true,
 			expectPatchForPort:      true,
 			isMultiSlice:            false,
 		},
 		"v7x respects user-defined ports and addresses": {
+			numOfHosts: 2,
 			customEnv: []corev1.EnvVar{
 				{Name: "TPU_PROCESS_PORT", Value: "9999"},
 				{Name: "TPU_PROCESS_ADDRESSES", Value: "custom-mesh:9999"},
 			},
 			expectedWorkerID:        "1",
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectPatchForAddresses: false,
 			expectPatchForPort:      false,
 			isMultiSlice:            false,
 		},
 		"v7x megascale multi-slice coordination": {
+			numOfHosts: 2,
 			customEnv: []corev1.EnvVar{
 				{Name: "MEGASCALE_NUM_SLICES", Value: "2"},
 			},
 			expectedWorkerID:        "1",
 			expectedPort:            "8472",
+			expectedLogDir:          "/tmp/tpu-logs/ray-worker-2",
 			expectedMegascalePort:   "8082", // Base port + 1
 			expectedMegascaleCoord:  fmt.Sprintf("test-group-0-0.test-cluster-%s:8081", utils.HeadlessServiceSuffix),
 			expectPatchForAddresses: true,

@@ -6,12 +6,11 @@ import (
 	"flag"
 	"log"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 func TestMain(m *testing.M) {
@@ -19,18 +18,9 @@ func TestMain(m *testing.M) {
 	if ns := os.Getenv("TEST_NAMESPACE"); ns != "" {
 		testNamespace = ns
 	}
-	var path string
-	if f := flag.Lookup("kubeconfig"); f != nil && f.Value.String() != "" {
-		path = f.Value.String()
-	} else if envKubeconfig := os.Getenv("KUBECONFIG"); envKubeconfig != "" {
-		path = envKubeconfig
-	} else if home := os.Getenv("HOME"); home != "" {
-		path = filepath.Join(home, ".kube", "config")
-	}
 
 	var err error
-
-	restConfig, err = clientcmd.BuildConfigFromFlags("", path)
+	restConfig, err = config.GetConfig()
 	if err != nil {
 		log.Fatalf("Failed to load Kubernetes config (E2E tests require a pre-existing cluster; see e2e/README.md): %v", err)
 	}

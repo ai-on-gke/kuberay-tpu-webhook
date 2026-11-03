@@ -35,14 +35,6 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-if [ -z "${LOCATION:-}" ]; then
-    if [ "$SETUP_CLUSTER" = false ] && [ -n "${ZONE:-}" ] && gcloud container clusters describe "$CLUSTER_NAME" --location "$ZONE" --project "$PROJECT_ID" >/dev/null 2>&1; then
-        LOCATION="$ZONE"
-    else
-        LOCATION="$REGION"
-    fi
-fi
-
 # Setup cluster if requested
 if [ "$SETUP_CLUSTER" = true ]; then
     echo "Setting up cluster..."
@@ -51,7 +43,7 @@ fi
 
 # Get credentials
 echo "Getting credentials for cluster $CLUSTER_NAME..."
-gcloud container clusters get-credentials "$CLUSTER_NAME" --location "$LOCATION" --project "$PROJECT_ID"
+gcloud container clusters get-credentials "$CLUSTER_NAME" --region "$REGION"
 
 # Install cert-manager - required for OSS webhook.
 echo "Checking for cert-manager..."
@@ -217,11 +209,11 @@ fi
 # Teardown GKE resources if requested and script finished successfully
 if [ "$TEARDOWN_CLUSTER" = true ]; then
     echo "Tearing down cluster $CLUSTER_NAME..."
-    gcloud container clusters delete "$CLUSTER_NAME" --location "$LOCATION" --project "$PROJECT_ID" --quiet || true
+    gcloud container clusters delete "$CLUSTER_NAME" --region "$REGION" --quiet || true
     echo "Tearing down firewall rule ${NETWORK_NAME}-allow-internal..."
-    gcloud compute firewall-rules delete "${NETWORK_NAME}-allow-internal" --project "$PROJECT_ID" --quiet || true
+    gcloud compute firewall-rules delete "${NETWORK_NAME}-allow-internal" --quiet || true
     echo "Tearing down subnet ${SUBNET_NAME}..."
-    gcloud compute networks subnets delete "${SUBNET_NAME}" --region="${REGION}" --project "$PROJECT_ID" --quiet || true
+    gcloud compute networks subnets delete "${SUBNET_NAME}" --region="${REGION}" --quiet || true
     echo "Tearing down network ${NETWORK_NAME}..."
-    gcloud compute networks delete "${NETWORK_NAME}" --project "$PROJECT_ID" --quiet || true
+    gcloud compute networks delete "${NETWORK_NAME}" --quiet || true
 fi

@@ -5,7 +5,6 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,26 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
-
-const (
-	// GKE TPU-specific labels.
-	replicaIndexLabelKey       = "ray.io/worker-group-replica-index"
-	legacyReplicaIndexLabelKey = "replicaIndex"
-)
-
-func writeLocalFileToPod(t *testing.T, podName string, containerName string, localPath string, remotePath string) {
-	t.Helper()
-	content, err := os.ReadFile(localPath)
-	if err != nil {
-		t.Fatalf("Failed to read local file %s: %v", localPath, err)
-	}
-	t.Logf("Writing local file %s to %s in pod %s...", localPath, remotePath, podName)
-	cmd := []string{"bash", "-c", "cat << 'EOF' > " + remotePath + "\n" + string(content) + "\nEOF\n"}
-	stdout, stderr, err := execCommandInPod(t, podName, containerName, cmd)
-	if err != nil {
-		t.Fatalf("Failed to write file %s to pod: %v (stdout: %q, stderr: %q)", remotePath, err, stdout, stderr)
-	}
-}
 
 func TestWebhookMutation_V6eSingleHost(t *testing.T) {
 	rayCluster := loadManifest(t, "../manifests/v6e/v6e-8-single-host.yaml")

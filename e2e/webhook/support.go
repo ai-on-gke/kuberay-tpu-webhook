@@ -5,7 +5,6 @@ package webhook
 import (
 	"bytes"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,6 +56,10 @@ const (
 	megascaleCoordinatorAddressEnv = "MEGASCALE_COORDINATOR_ADDRESS"
 	megascalePortEnv               = "MEGASCALE_PORT"
 
+	// GKE TPU-specific labels.
+	replicaIndexLabelKey       = "ray.io/worker-group-replica-index"
+	legacyReplicaIndexLabelKey = "replicaIndex"
+
 	// Ray-specific labels.
 	rayNodeTypeWorker = string(rayv1.WorkerNode)
 	rayNodeTypeHead   = string(rayv1.HeadNode)
@@ -77,12 +80,6 @@ var (
 		Resource: "rayjobs",
 	}
 )
-
-func init() {
-	if flag.Lookup("kubeconfig") == nil {
-		flag.String("kubeconfig", "", "(optional) absolute path to the kubeconfig file")
-	}
-}
 
 func loadManifest(t *testing.T, relativePath string) *rayv1.RayCluster {
 	t.Helper()
@@ -232,6 +229,20 @@ func execCommandInPod(t *testing.T, podName string, containerName string, cmd []
 		Stderr: &stderr,
 	})
 	return stdout.String(), stderr.String(), err
+}
+
+func writeLocalFileToPod(t *testing.T, podName string, containerName string, localPath string, remotePath string) {
+	t.Helper()
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("Failed to read local file %s: %v", localPath, err)
+	}
+	t.Logf("Writing local file %s to %s in pod %s...", localPath, remotePath, podName)
+	cmd := []string{"bash", "-c", "cat << 'EOF' > " + remotePath + "\n" + string(content) + "\nEOF\n"}
+	stdout, stderr, err := execCommandInPod(t, podName, containerName, cmd)
+	if err != nil {
+		t.Fatalf("Failed to write file %s to pod: %v (stdout: %q, stderr: %q)", remotePath, err, stdout, stderr)
+	}
 }
 
 func waitForAllPodsRunning(
