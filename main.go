@@ -1129,8 +1129,6 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse host index label: %w", err)
 			}
-		} else {
-			tpuWorkerID = 0
 		}
 	} else {
 		// Fallback for older KubeRay versions that do not set K8s index labels.
