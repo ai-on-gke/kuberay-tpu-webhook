@@ -161,6 +161,7 @@ func getTestPods(templatePod *corev1.Pod, clusterName string, namespace string, 
 	for i := 0; i < numPods; i++ {
 		templatePodCopy := templatePod.DeepCopy()
 		templatePodCopy.Name = fmt.Sprintf("%s-%d", templatePod.Name, i)
+		templatePodCopy.Labels[utils.RayNodeTypeLabelKey] = string(rayv1.WorkerNode)
 		testPods = append(testPods, templatePodCopy)
 	}
 	return testPods
@@ -587,8 +588,10 @@ func Test_GetNextWorkerID(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			workerID, err := getNextWorkerID(tc.sliceToTPUHosts, tc.podSlice, "test-namespace", tc.replicaIndex)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
 			}
 			assert.Equal(t, tc.expectedTPUWorkerID, workerID)
 		})
@@ -619,11 +622,14 @@ func Test_ContainerRequestingTPUs(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			testPods := getTestPods(tc.testPod, "test-cluster", "test-namespace", tc.numPods)
+			workerPodsChecked := 0
 			for _, pod := range testPods {
 				if pod.Labels[utils.RayNodeTypeLabelKey] == string(rayv1.WorkerNode) {
+					workerPodsChecked++
 					assert.Equal(t, tc.requestsTPUs, containerRequestingTPUs(pod.Spec.Containers...))
 				}
 			}
+			assert.Equal(t, tc.numPods, workerPodsChecked)
 		})
 	}
 }
@@ -677,11 +683,11 @@ func Test_GetNumTPUHostsFromTopology(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			vms, err := getNumTPUHostsFromTopology("test-cluster", "test-group", "test-namespace", tc.topology, tc.chipsPerHost)
-			if err == nil {
-				assert.Equal(t, tc.expectedHosts, vms)
-			}
-			if tc.topology == "" {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.expectedHosts, vms)
 			}
 		})
 	}
@@ -791,9 +797,10 @@ func Test_ExtractPod(t *testing.T) {
 			admissionReview.Request.Kind.Kind = tc.expectedKind
 
 			actualPod, err := extractPod(admissionReview)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				// jsons don't match exactly after marshal -> unmarshal so just check fields
 				assert.Equal(t, tc.testPod.Name, actualPod.Name)
 				assert.Equal(t, tc.testPod.Namespace, actualPod.Namespace)
@@ -834,9 +841,10 @@ func Test_ExtractRayCluster(t *testing.T) {
 			admissionReview.Request.Kind.Kind = tc.expectedKind
 
 			actualRayCluster, err := extractRayCluster(admissionReview)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				// jsons don't match exactly after marshal -> unmarshal so just check fields
 				assert.Equal(t, tc.testRayCluster.Name, actualRayCluster.Name)
 				// assert.Equal(t, tc.testRayCluster.Spec.WorkerGroupSpecs, actualRayCluster.Spec.WorkerGroupSpecs)
@@ -894,9 +902,10 @@ func Test_GenDNSHostnames(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			hostnames, err := genDNSHostnames(tc.numOfHosts, "test-group", tc.clusterName, "test-namespace", tc.replicaIndex)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				assert.Equal(t, tc.expectedHostnames, hostnames)
 			}
 		})
@@ -1308,8 +1317,10 @@ func Test_CheckWorkersMatchTopology(t *testing.T) {
 
 			workersMatchTopology, err := checkWorkersMatchTopology("test-cluster", "test-namespace", *workerGroupSpec)
 
-			if tc.expectedNumOfHosts == 0 || tc.missingContainers == true || tc.expectedTopology == "" {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
+			} else {
+				assert.NoError(t, err)
 			}
 			assert.Equal(t, tc.workersMatch, workersMatchTopology)
 		})
@@ -1342,7 +1353,7 @@ func Test_ValidateRayCluster(t *testing.T) {
 		"validateRayCluster no workerGroupSpecs": {
 			// doesn't create any workergroups, pass-through
 			rayCluster:          getTestRayCluster("test-cluster", "test-group", "test-namespace", int32(1), 1, "0", "", "", false),
-			missingWorkerGroups: false,
+			missingWorkerGroups: true,
 			expectedAllowed:     true,
 			expectedResult: &metav1.Status{
 				Status:  "Success",
@@ -1919,6 +1930,7 @@ func Test_getSliceToTPUHosts(t *testing.T) {
 
 			// sliceToTPUHosts should be populated with slices and unique TPU_WORKER_IDs for each Pod
 			assert.Equal(t, err, nil)
+			assert.Len(t, sliceToTPUHosts, len(tc.expectedsliceToTPUHosts))
 			for slice, workerIDs := range sliceToTPUHosts {
 				assert.Contains(t, tc.expectedsliceToTPUHosts, slice)
 				assert.Equal(t, len(tc.expectedsliceToTPUHosts[slice]), len(workerIDs))
@@ -1943,7 +1955,8 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 	}{
 		"isLastAdmittedPod Pod missing RayCluster label": {
 			// missing Ray cluster label - returns error
-			testPod:       getTestCPUWorker("", "test-group", "test-namespace"),
+			testPod:       getTestTPUWorker("", "test-group", "test-namespace", "tpu-v6e-slice", "4x4", "4"),
+			testReplicaID: "test-group-0",
 			expectedError: errors.New("Ray Pod created by KubeRay missing RayCluster label"),
 		},
 		"isLastAdmittedPod Pod does not request TPUs": {
@@ -2016,9 +2029,10 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 			}
 
 			isLastAdmitted, err := tpuWebhookServer.isLastAdmittedPod(testPod)
-			if err != nil {
+			if tc.expectedError != nil {
 				assert.Equal(t, tc.expectedError, err)
 			} else {
+				assert.NoError(t, err)
 				assert.Equal(t, tc.isLastAdmitted, isLastAdmitted)
 			}
 		})
@@ -2314,14 +2328,6 @@ func Test_MutatePod(t *testing.T) {
 			}
 
 			// Validate all expected patches exist.
-			// Check replicaIndex Label
-			if tc.useKubeRayLabels {
-				// In this case, we shouldn't inject a label because it's handled by KubeRay.
-				assert.Nil(t, findPatchValue("/metadata/labels/replicaIndex"), "Legacy replicaIndex label should NOT be patched.")
-			} else {
-				assert.Equal(t, tc.expectedReplicaLabel, findPatchValue("/metadata/labels/replicaIndex"))
-			}
-
 			// 1. Check Replica Label
 			if tc.useKubeRayLabels {
 				assert.Nil(t, findPatchValue("/metadata/labels/replicaIndex"), "Legacy replicaIndex label should NOT be patched in Fast Path")
@@ -2815,6 +2821,13 @@ func generateTestCertKeyPair(t *testing.T, orgName, certPath, keyPath string) {
 // TestWebhookCertReloadsOnChange verifies that the server correctly reloads TLS certificate.
 func TestWebhookCertReloadsOnChange(t *testing.T) {
 	tmpDir := t.TempDir()
+
+	origCertFile, origKeyFile, origBindAddr := CertFile, KeyFile, BindAddr
+	t.Cleanup(func() {
+		CertFile = origCertFile
+		KeyFile = origKeyFile
+		BindAddr = origBindAddr
+	})
 
 	// Set webhook flags.
 	CertFile = filepath.Join(tmpDir, "tls.crt")

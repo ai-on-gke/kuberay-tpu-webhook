@@ -9,7 +9,7 @@ CLUSTER_NAME=${CLUSTER_NAME:-ray-llm-cluster}
 NAMESPACE=${NAMESPACE:-default}
 RAY_IMAGE=${RAY_IMAGE:-rayproject/ray:nightly-tpu}
 RAY_TPU7X_IMAGE=${RAY_TPU7X_IMAGE:-rayproject/ray:nightly-py312-tpu}
-RAY_SERVE_IMAGE=${RAY_SERVE_IMAGE:-vllm/vllm-tpu:nightly}
+RAY_SERVE_IMAGE=${RAY_SERVE_IMAGE:-vllm/vllm-tpu:v0.28.0}
 WEBHOOK_IMAGE=${WEBHOOK_IMAGE:-}
 if [ "$NAMESPACE" = "default" ]; then
     NAMESPACE="test-ns-$(head /dev/urandom | tr -dc a-z0-9 | head -c 5)"
@@ -91,8 +91,8 @@ if kubectl get secret hf-token-secret -n default >/dev/null 2>&1; then
     TOKEN=$(kubectl get secret hf-token-secret -n default -o jsonpath='{.data.token}' | base64 -d)
     kubectl create secret generic hf-token-secret --from-literal=token="$TOKEN" -n "$NAMESPACE"
 else
-    echo "Warning: hf-token-secret not found in default namespace. Creating a dummy secret to allow pods to schedule."
-    kubectl create secret generic hf-token-secret --from-literal=token="dummy" -n "$NAMESPACE"
+    echo "Warning: hf-token-secret not found in default namespace. Creating an empty secret to allow pods to schedule."
+    kubectl create secret generic hf-token-secret --from-literal=token="" -n "$NAMESPACE"
 fi
 
 # Initialize final exit code
@@ -106,7 +106,7 @@ cat e2e/manifests/tpu7x/tpu7x-8-single-host.yaml | sed "s|rayproject/ray:nightly
 cat e2e/manifests/tpu7x/tpu7x-multi-container.yaml | sed "s|rayproject/ray:nightly-py312-tpu|$RAY_TPU7X_IMAGE|g" | kubectl apply -n "$NAMESPACE" -f -
 set +e
 echo "Running Validation, Single-Host, & Multi-Container E2E tests (Group 1)..."
-go test -timeout 60m -tags=e2e -count=1 -v ./e2e/webhook/... -run "TestWebhookMutation_V6eSingleHost|TestRayClusterValidation|TestWebhookMutation_HeterogeneousCluster|TestWebhookMutation_V7xSingleHost|TestWebhookMutation_V7xMultiContainer"
+go test -timeout 60m -tags=e2e -count=1 -v ./e2e/webhook/... -run "TestWebhookMutation_V6eSingleHost|TestWebhookMutation_TorchTpuEnvs|TestRayClusterValidation|TestWebhookMutation_HeterogeneousCluster|TestWebhookMutation_V7xSingleHost|TestWebhookMutation_V7xMultiContainer"
 GROUP1_EXIT=$?
 set -e
 echo "Cleaning up Validation, Single-Host, & Multi-Container manifests..."
@@ -183,8 +183,8 @@ fi
 # 6. Run RayServe integration tests
 echo "Deploying RayServe integration manifests inside namespace $NAMESPACE..."
 kubectl create configmap rayservice-script --from-file=serve_tpu_multihost.py=e2e/scripts/serve_tpu_multihost.py -n "$NAMESPACE"
-cat e2e/manifests/v6e/v6e-rayservice-single.yaml | sed "s|vllm/vllm-tpu:nightly|$RAY_SERVE_IMAGE|g" | kubectl apply -n "$NAMESPACE" -f -
-cat e2e/manifests/v6e/v6e-rayservice-multi.yaml | sed "s|vllm/vllm-tpu:nightly|$RAY_SERVE_IMAGE|g" | kubectl apply -n "$NAMESPACE" -f -
+cat e2e/manifests/v6e/v6e-rayservice-single.yaml | sed "s|vllm/vllm-tpu:v0.28.0|$RAY_SERVE_IMAGE|g" | kubectl apply -n "$NAMESPACE" -f -
+cat e2e/manifests/v6e/v6e-rayservice-multi.yaml | sed "s|vllm/vllm-tpu:v0.28.0|$RAY_SERVE_IMAGE|g" | kubectl apply -n "$NAMESPACE" -f -
 set +e
 echo "Running RayServe integration tests (Group 6)..."
 go test -timeout 60m -tags=e2e -count=1 -v ./e2e/webhook/... -run "TestRayServiceIntegration"

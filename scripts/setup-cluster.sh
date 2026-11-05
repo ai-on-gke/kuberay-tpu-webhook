@@ -103,6 +103,23 @@ else
     echo "Node pool v6e-2x4 already exists."
 fi
 
+if ! gcloud container node-pools describe v6e-2x2 --cluster="$CLUSTER_NAME" --region="$REGION" >/dev/null 2>&1; then
+    echo "Creating node pool v6e-2x2 (4 chips, single host)..."
+    gcloud container node-pools create v6e-2x2 \
+        --location="$REGION" \
+        --node-locations="us-central1-b" \
+        --cluster="$CLUSTER_NAME" \
+        --machine-type=ct6e-standard-4t \
+        --threads-per-core=2 \
+        --tpu-topology=2x2 \
+        --num-nodes=1 \
+        --enable-gvnic \
+        --spot \
+        --scopes=https://www.googleapis.com/auth/cloud-platform
+else
+    echo "Node pool v6e-2x2 already exists."
+fi
+
 # Provision single-host and multi-host TPU node pools for tpu7x
 if ! gcloud container node-pools describe tpu7x-2x2x1 --cluster="$CLUSTER_NAME" --region="$REGION" >/dev/null 2>&1; then
     echo "Creating node pool tpu7x-2x2x1 (single host)..."

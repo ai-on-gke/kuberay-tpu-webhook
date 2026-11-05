@@ -5,7 +5,6 @@ package webhook
 import (
 	"bytes"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,7 +35,6 @@ import (
 )
 
 var (
-	kubeconfig    *string
 	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
 	restConfig    *rest.Config
@@ -82,18 +80,6 @@ var (
 		Resource: "rayjobs",
 	}
 )
-
-func init() {
-	if flag.Lookup("kubeconfig") == nil {
-		if home := os.Getenv("HOME"); home != "" {
-			kubeconfig = flag.String("kubeconfig",
-				filepath.Join(home, ".kube", "config"),
-				"(optional) absolute path to the kubeconfig file")
-		} else {
-			kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-		}
-	}
-}
 
 func loadManifest(t *testing.T, relativePath string) *rayv1.RayCluster {
 	t.Helper()
