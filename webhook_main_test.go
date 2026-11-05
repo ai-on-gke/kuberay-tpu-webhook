@@ -2025,6 +2025,50 @@ func Test_IsLastAdmittedPod(t *testing.T) {
 	}
 }
 
+func Test_IsLastAdmittedPod_V7xMultiContainer(t *testing.T) {
+	mk := func() *corev1.Pod {
+		pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x2", "2")
+		second := pod.Spec.Containers[0].DeepCopy()
+		second.Name = "ray-worker-container-2"
+		pod.Spec.Containers = append(pod.Spec.Containers, *second)
+		if pod.Labels == nil {
+			pod.Labels = map[string]string{}
+		}
+		delete(pod.Labels, utils.RayWorkerReplicaIndexKey)
+		delete(pod.Labels, utils.RayHostIndexKey)
+		return pod
+	}
+
+	existing := mk()
+	existing.Name = "existing-host-0"
+	existing.Labels[legacyReplicaIndexLabelKey] = "test-group-0"
+	existing.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "TPU_WORKER_ID", Value: "0"}}
+	existing.Spec.Containers[1].Env = []corev1.EnvVar{{Name: "TPU_WORKER_ID", Value: "1"}}
+
+	s := NewTPUWebhookServer(setupInformer(existing), setupNodeInformer())
+
+	incoming := mk()
+	review := getTestAdmissionReview("Pod", "CREATE")
+	raw, _ := json.Marshal(incoming)
+	review.Request.Object.Raw = raw
+	review.Request.Object.Object = incoming
+
+	resp, err := s.mutatePod(review)
+	assert.NoError(t, err)
+	patched := applyPatches(t, incoming, resp.Patch)
+
+	id0, _, _ := getEnvironmentVariable("TPU_WORKER_ID", patched.Spec.Containers[0])
+	id1, _, _ := getEnvironmentVariable("TPU_WORKER_ID", patched.Spec.Containers[1])
+	assert.Equal(t, "2", id0)
+	assert.Equal(t, "3", id1)
+	assert.Equal(t, "test-group-0", patched.Labels[legacyReplicaIndexLabelKey])
+
+	synced, err := s.isLastAdmittedPod(patched)
+	assert.NoError(t, err)
+	assert.True(t, synced)
+	assert.True(t, s.cacheCond.synced)
+}
+
 func Test_MutatePod(t *testing.T) {
 	tests := map[string]struct {
 		testPod                      *corev1.Pod
@@ -2162,6 +2206,27 @@ func Test_MutatePod(t *testing.T) {
 			checkMultiSlice:      true,
 			useKubeRayLabels:     true,
 		},
+		"mutatePod single-host TPU worker group with KubeRay replica-index label only": {
+			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
+			numOfHosts:         1,
+			existingPods:       0,
+			existingReplicas:   0,
+			expectedWorkerID:   "0",
+			expectedReplicaID:  2,
+			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 2),
+			useKubeRayLabels:   true,
+		},
+		"mutatePod single-host Multi-Slice TPU worker group with KubeRay replica-index label only": {
+			testPod:            getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu-v4-podslice", "2x2x1", "4"),
+			numOfHosts:         1,
+			existingPods:       0,
+			existingReplicas:   0,
+			expectedWorkerID:   "0",
+			expectedReplicaID:  1,
+			expectedWorkerName: fmt.Sprintf("%s-%d", "test-group", 1),
+			checkMultiSlice:    true,
+			useKubeRayLabels:   true,
+		},
 	}
 
 	for name, tc := range tests {
@@ -2185,7 +2250,9 @@ func Test_MutatePod(t *testing.T) {
 					inputPod.Labels = make(map[string]string)
 				}
 				inputPod.Labels[utils.RayWorkerReplicaIndexKey] = fmt.Sprint(tc.expectedReplicaID)
-				inputPod.Labels[utils.RayHostIndexKey] = tc.expectedWorkerID
+				if tc.numOfHosts > 1 {
+					inputPod.Labels[utils.RayHostIndexKey] = tc.expectedWorkerID
+				}
 			}
 
 			// set up admissionReview object
@@ -3408,82 +3475,134 @@ func Test_MutatePod_TPU7x_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(
 }
 
 func Test_MutatePod_TPU7x_MultiContainer_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
-	// Simulate GKE 1.37+ admission order on a multi-container Ironwood TPU pod (2 TPU containers).
-	// Host index 1 means container 0 gets worker ID 2 (1*2 + 0) and container 1 gets worker ID 3 (1*2 + 1).
-	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x2", "2")
-	if pod.Labels == nil {
-		pod.Labels = make(map[string]string)
+	testCases := []struct {
+		name                   string
+		topology               string
+		replicaIndex           string
+		hostIndex              string
+		container1InitWorkerID string
+		expectedWorkerID0      string
+		expectedWorkerID1      string
+	}{
+		{
+			name:                   "multi-host host 1 with container 1 pre-populated with container index",
+			topology:               "2x2x2",
+			replicaIndex:           "0",
+			hostIndex:              "1",
+			container1InitWorkerID: "1",
+			expectedWorkerID0:      "2",
+			expectedWorkerID1:      "3",
+		},
+		{
+			name:                   "multi-host host 1 with TPU_WORKER_ID=0 in every TPU container",
+			topology:               "2x2x2",
+			replicaIndex:           "0",
+			hostIndex:              "1",
+			container1InitWorkerID: "0",
+			expectedWorkerID0:      "2",
+			expectedWorkerID1:      "3",
+		},
+		{
+			name:                   "multi-host host 0 with TPU_WORKER_ID=0 in every TPU container",
+			topology:               "2x2x2",
+			replicaIndex:           "0",
+			hostIndex:              "0",
+			container1InitWorkerID: "0",
+			expectedWorkerID0:      "0",
+			expectedWorkerID1:      "1",
+		},
+		{
+			name:                   "single-host with replica-index label only and TPU_WORKER_ID=0 in every TPU container",
+			topology:               "2x2x1",
+			replicaIndex:           "2",
+			hostIndex:              "",
+			container1InitWorkerID: "0",
+			expectedWorkerID0:      "0",
+			expectedWorkerID1:      "1",
+		},
 	}
-	pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
-	pod.Labels[utils.RayHostIndexKey] = "1"
 
-	// Container 0 pre-populated by warden-mutating:
-	pod.Spec.Containers[0].Env = []corev1.EnvVar{
-		{Name: "APP_ENV", Value: "worker-1"},
-		{Name: "TPU_WORKER_ID", Value: "0"},
-		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
-		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// If warden-mutating runs first on a multi-container Ironwood TPU pod (2 TPU containers),
+			// verify both containers receive unique worker IDs (hostIndex*2 + containerIndex) via in-place replacement.
+			pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", tc.topology, "2")
+			if pod.Labels == nil {
+				pod.Labels = make(map[string]string)
+			}
+			pod.Labels[utils.RayWorkerReplicaIndexKey] = tc.replicaIndex
+			if tc.hostIndex != "" {
+				pod.Labels[utils.RayHostIndexKey] = tc.hostIndex
+			}
+
+			pod.Spec.Containers[0].Env = []corev1.EnvVar{
+				{Name: "APP_ENV", Value: "worker-1"},
+				{Name: "TPU_WORKER_ID", Value: "0"},
+				{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+				{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+			}
+
+			secondContainer := pod.Spec.Containers[0].DeepCopy()
+			secondContainer.Name = "ray-worker-container-2"
+			secondContainer.Env = []corev1.EnvVar{
+				{Name: "APP_ENV", Value: "worker-2"},
+				{Name: "TPU_WORKER_ID", Value: tc.container1InitWorkerID},
+				{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
+				{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
+			}
+			pod.Spec.Containers = append(pod.Spec.Containers, *secondContainer)
+
+			admissionReview := getTestAdmissionReview("Pod", "CREATE")
+			jsonPod, _ := json.Marshal(pod)
+			admissionReview.Request.Object.Raw = jsonPod
+			admissionReview.Request.Object.Object = pod
+
+			testPodLister := setupInformer()
+			tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
+
+			admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
+			assert.NoError(t, err)
+			assert.NotNil(t, admissionResponse)
+			assert.True(t, admissionResponse.Allowed)
+
+			patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+			assert.Empty(t, patchedPod.Labels[legacyReplicaIndexLabelKey], "Legacy replicaIndex label should not be set on fast path")
+
+			// Check Container 0
+			counts0 := make(map[string]int)
+			for _, env := range patchedPod.Spec.Containers[0].Env {
+				counts0[env.Name]++
+			}
+			for envName, count := range counts0 {
+				assert.Equal(t, 1, count, "Container 0: EnvVar %s appears %d times, expected exactly 1", envName, count)
+			}
+			val0, _, exists0 := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[0])
+			assert.True(t, exists0)
+			assert.Equal(t, tc.expectedWorkerID0, val0)
+
+			// Check Container 1
+			counts1 := make(map[string]int)
+			for _, env := range patchedPod.Spec.Containers[1].Env {
+				counts1[env.Name]++
+			}
+			for envName, count := range counts1 {
+				assert.Equal(t, 1, count, "Container 1: EnvVar %s appears %d times, expected exactly 1", envName, count)
+			}
+			val1, _, exists1 := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[1])
+			assert.True(t, exists1)
+			assert.Equal(t, tc.expectedWorkerID1, val1)
+		})
 	}
-
-	// Add second container requesting TPU, pre-populated by warden-mutating:
-	secondContainer := pod.Spec.Containers[0].DeepCopy()
-	secondContainer.Name = "ray-worker-container-2"
-	secondContainer.Env = []corev1.EnvVar{
-		{Name: "APP_ENV", Value: "worker-2"},
-		{Name: "TPU_WORKER_ID", Value: "1"}, // warden assigns 1 to container 1
-		{Name: "TPU_WORKER_HOSTNAMES", Value: "localhost"},
-		{Name: "TPU_PROCESS_ADDRESSES", Value: "localhost:8471"},
-	}
-	pod.Spec.Containers = append(pod.Spec.Containers, *secondContainer)
-
-	admissionReview := getTestAdmissionReview("Pod", "CREATE")
-	jsonPod, _ := json.Marshal(pod)
-	admissionReview.Request.Object.Raw = jsonPod
-	admissionReview.Request.Object.Object = pod
-
-	testPodLister := setupInformer()
-	tpuWebhookServer := NewTPUWebhookServer(testPodLister, setupNodeInformer())
-
-	admissionResponse, err := tpuWebhookServer.mutatePod(admissionReview)
-	assert.NoError(t, err)
-	assert.NotNil(t, admissionResponse)
-	assert.True(t, admissionResponse.Allowed)
-
-	patchedPod := applyPatches(t, pod, admissionResponse.Patch)
-
-	// Check Container 0
-	counts0 := make(map[string]int)
-	for _, env := range patchedPod.Spec.Containers[0].Env {
-		counts0[env.Name]++
-	}
-	for envName, count := range counts0 {
-		assert.Equal(t, 1, count, "Container 0: EnvVar %s appears %d times, expected exactly 1", envName, count)
-	}
-	val0, _, exists0 := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[0])
-	assert.True(t, exists0)
-	assert.Equal(t, "2", val0)
-
-	// Check Container 1
-	counts1 := make(map[string]int)
-	for _, env := range patchedPod.Spec.Containers[1].Env {
-		counts1[env.Name]++
-	}
-	for envName, count := range counts1 {
-		assert.Equal(t, 1, count, "Container 1: EnvVar %s appears %d times, expected exactly 1", envName, count)
-	}
-	val1, _, exists1 := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[1])
-	assert.True(t, exists1)
-	assert.Equal(t, "3", val1)
 }
 
 func Test_MutatePod_TPU7x_SingleHost_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
-	// Single host TPU worker (1 host).
+	// Single host TPU worker (1 host) with RayMultiHostIndexing: KubeRay sets
+	// ray.io/worker-group-replica-index and omits ray.io/replica-host-index.
 	pod := getTestTPUWorker("test-cluster", "test-group", "test-namespace", "tpu7x", "2x2x1", "4")
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
-	pod.Labels[utils.RayWorkerReplicaIndexKey] = "0"
-	pod.Labels[utils.RayHostIndexKey] = "0"
+	pod.Labels[utils.RayWorkerReplicaIndexKey] = "2"
 
 	pod.Spec.Containers[0].Env = []corev1.EnvVar{
 		{Name: "TPU_WORKER_ID", Value: "0"},
@@ -3504,6 +3623,8 @@ func Test_MutatePod_TPU7x_SingleHost_WardenMutatingPrePopulatedDefaults_NoDuplic
 	assert.NotNil(t, admissionResponse)
 
 	patchedPod := applyPatches(t, pod, admissionResponse.Patch)
+	assert.Empty(t, patchedPod.Labels[legacyReplicaIndexLabelKey], "Legacy replicaIndex label should not be set on fast path")
+
 	counts := make(map[string]int)
 	for _, env := range patchedPod.Spec.Containers[0].Env {
 		counts[env.Name]++
@@ -3513,6 +3634,10 @@ func Test_MutatePod_TPU7x_SingleHost_WardenMutatingPrePopulatedDefaults_NoDuplic
 	}
 	valID, _, _ := getEnvironmentVariable("TPU_WORKER_ID", patchedPod.Spec.Containers[0])
 	assert.Equal(t, "0", valID)
+	valName, _, _ := getEnvironmentVariable("TPU_NAME", patchedPod.Spec.Containers[0])
+	assert.Equal(t, "test-group-2", valName)
+	valHostnames, _, _ := getEnvironmentVariable("TPU_WORKER_HOSTNAMES", patchedPod.Spec.Containers[0])
+	assert.Equal(t, "localhost", valHostnames)
 }
 
 func Test_MutatePod_NonV7x_WardenMutatingPrePopulatedDefaults_NoDuplicateEnvVars(t *testing.T) {
