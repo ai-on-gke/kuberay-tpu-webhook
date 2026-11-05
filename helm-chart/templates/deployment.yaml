@@ -76,6 +76,8 @@ spec:
           args:
           - --v={{ .Values.tpuWebhook.deployment.verbosity }}
           - --bind-address=:{{ .Values.tpuWebhook.deployment.bindPort }}
+          - --tls-cert-file=/etc/kuberay-tpu-webhook/tls/tls.crt
+          - --tls-private-key-file=/etc/kuberay-tpu-webhook/tls/tls.key
           ports:
           - name: https
             containerPort: {{ .Values.tpuWebhook.deployment.bindPort }}
