@@ -96,6 +96,12 @@ const (
 	gkeTPUAcceleratorLabel = gkeLabelPrefix + "gke-tpu-accelerator"
 	gkeNodePoolLabel       = gkeLabelPrefix + "gke-nodepool"
 
+	// GKE Dynamic Slicing node labels applied by slice-controller.
+	gkeTPUSliceLabel      = gkeLabelPrefix + "gke-tpu-slice"
+	gkeTPUPartitionPrefix = gkeLabelPrefix + "gke-tpu-partition-"
+	gkeTPUSliceIDPrefix   = gkeLabelPrefix + "gke-tpu-slice-"
+	gkeTPUIDSuffix        = "-id"
+
 	// Topology labels.
 	gceTopologyBlockLabel    = gkeLabelPrefix + "gce-topology-block"
 	gceTopologySubblockLabel = gkeLabelPrefix + "gce-topology-subblock"
@@ -132,6 +138,167 @@ func hasKueueTASSchedulingGate(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// getPodTopology returns the target slice topology from the subslice annotation if set,
+// falling back to the gke-tpu-topology nodeSelector.
+func getPodTopology(annotations, nodeSelector map[string]string) string {
+	if topology, ok := annotations[tpuSubsliceTopologyAnnotation]; ok {
+		return topology
+	}
+	return nodeSelector[tpuTopologyLabel]
+}
+
+// parsePositive3DDims parses a 2D ("2x4") or 3D ("2x2x2") topology string into normalized
+// positive 3D dimensions.
+func parsePositive3DDims(topology string) ([]int, bool) {
+	if topology == "" {
+		return nil, false
+	}
+	dims, err := getDimsFromTopology(topology)
+	if err != nil || len(dims) != 3 {
+		return nil, false
+	}
+	for _, d := range dims {
+		if d <= 0 {
+			return nil, false
+		}
+	}
+	return dims, true
+}
+
+// parseDynamicSliceIDLabelDims extracts normalized 3D topology dimensions from GKE Dynamic Slicing
+// partition/slice ID labels ("cloud.google.com/gke-tpu-partition-<shape>-id" on tpu7x/tpu7 and
+// "cloud.google.com/gke-tpu-slice-<shape>-id" on v6e).
+func parseDynamicSliceIDLabelDims(key string) ([]int, bool) {
+	if !strings.HasSuffix(key, gkeTPUIDSuffix) {
+		return nil, false
+	}
+	var shape string
+	switch {
+	case strings.HasPrefix(key, gkeTPUPartitionPrefix):
+		shape = strings.TrimSuffix(strings.TrimPrefix(key, gkeTPUPartitionPrefix), gkeTPUIDSuffix)
+	case strings.HasPrefix(key, gkeTPUSliceIDPrefix):
+		shape = strings.TrimSuffix(strings.TrimPrefix(key, gkeTPUSliceIDPrefix), gkeTPUIDSuffix)
+	default:
+		return nil, false
+	}
+	return parsePositive3DDims(shape)
+}
+
+// requiredNodeLabelKeys returns the sorted set of node label keys guaranteed to exist on every
+// candidate node matching podSpec via nodeSelector or required nodeAffinity. Because Kubernetes
+// ORs NodeSelectorTerms together, a nodeAffinity key is guaranteed only if every term requires it
+// via In (with non-empty values) or Exists.
+func requiredNodeLabelKeys(podSpec *corev1.PodSpec) []string {
+	seen := make(map[string]struct{}, len(podSpec.NodeSelector))
+	for k := range podSpec.NodeSelector {
+		seen[k] = struct{}{}
+	}
+	if podSpec.Affinity != nil &&
+		podSpec.Affinity.NodeAffinity != nil &&
+		podSpec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		terms := podSpec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+		if len(terms) > 0 {
+			var common map[string]struct{}
+			for i, term := range terms {
+				termKeys := make(map[string]struct{}, len(term.MatchExpressions))
+				for _, expr := range term.MatchExpressions {
+					if (expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) > 0) ||
+						expr.Operator == corev1.NodeSelectorOpExists {
+						termKeys[expr.Key] = struct{}{}
+					}
+				}
+				if i == 0 {
+					common = termKeys
+				} else {
+					for k := range common {
+						if _, ok := termKeys[k]; !ok {
+							delete(common, k)
+						}
+					}
+				}
+			}
+			for k := range common {
+				seen[k] = struct{}{}
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
+}
+
+// targetsDynamicSliceSelection returns true if podSpec explicitly selects a GKE Dynamic Slicing
+// Slice CR label or partition/slice topology ID label.
+func targetsDynamicSliceSelection(podSpec *corev1.PodSpec) bool {
+	for _, key := range requiredNodeLabelKeys(podSpec) {
+		if key == gkeTPUSliceLabel {
+			return true
+		}
+		if _, ok := parseDynamicSliceIDLabelDims(key); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDynamicSliceTopologyKey inspects a Pod targeting GKE Dynamic Slicing via default-scheduler.
+// When targeted is true, topologyKey is the per-replica slice domain key (co-locating hosts of the
+// same replica within one slice/partition without blocking other slices in the shared PROVISION_ONLY
+// node pool), or "" when synthetic affinity should be skipped because a replica spans multiple
+// partitions (SuperSlice) or carves inside a larger parent slice/partition.
+func resolveDynamicSliceTopologyKey(pod *corev1.Pod, numOfHosts int) (topologyKey string, targeted bool) {
+	keys := requiredNodeLabelKeys(&pod.Spec)
+	chipsPerHost := getNumTPUChipsRequested(pod.Spec.Containers...)
+	targetDims, hasTargetDims := parsePositive3DDims(getPodTopology(pod.Annotations, pod.Spec.NodeSelector))
+
+	hasSliceLabel := false
+	hasAnyPartitionID := false
+	exactTopologyMatch := ""
+	hostCountMatch := ""
+
+	for _, key := range keys {
+		if key == gkeTPUSliceLabel {
+			hasSliceLabel = true
+			continue
+		}
+		dims, ok := parseDynamicSliceIDLabelDims(key)
+		if !ok {
+			continue
+		}
+		hasAnyPartitionID = true
+		if chipsPerHost > 0 {
+			hosts := max(calculateTotalChips(dims)/int(chipsPerHost), 1)
+			if hosts == numOfHosts {
+				if exactTopologyMatch == "" && hasTargetDims && slices.Equal(dims, targetDims) {
+					exactTopologyMatch = key
+				}
+				if hostCountMatch == "" {
+					hostCountMatch = key
+				}
+			}
+		}
+	}
+
+	if exactTopologyMatch != "" {
+		return exactTopologyMatch, true
+	}
+	if hostCountMatch != "" {
+		return hostCountMatch, true
+	}
+	if hasSliceLabel {
+		if parentTopo := pod.Spec.NodeSelector[tpuTopologyLabel]; parentTopo != "" && chipsPerHost > 0 {
+			if parentDims, ok := parsePositive3DDims(parentTopo); ok {
+				if max(calculateTotalChips(parentDims)/int(chipsPerHost), 1) > numOfHosts {
+					return "", true
+				}
+			}
+		}
+		return gkeTPUSliceLabel, true
+	}
+	if hasAnyPartitionID {
+		return "", true
+	}
+	return "", false
 }
 
 var (
@@ -493,16 +660,24 @@ func makeLabelSelectorRequirement(key string, op metav1.LabelSelectorOperator, v
 	}
 }
 
-// getGKETopologyKey returns the first GKE topology key found in the Pod's affinity,
-// defaulting to the nodepool key if none are found.
-func getGKETopologyKey(pod *corev1.Pod) string {
-	// Use explicit user-configured podAffinity if present.
+// getExplicitGKETopologyKey returns the first user-configured GKE topology key in PodAffinity,
+// or "" if none is specified.
+func getExplicitGKETopologyKey(pod *corev1.Pod) string {
 	if pod.Spec.Affinity != nil && pod.Spec.Affinity.PodAffinity != nil {
 		for _, term := range pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
 			if strings.HasPrefix(term.TopologyKey, gkeLabelPrefix) {
 				return term.TopologyKey
 			}
 		}
+	}
+	return ""
+}
+
+// getGKETopologyKey returns the first GKE topology key found in the Pod's affinity,
+// defaulting to the nodepool key if none are found.
+func getGKETopologyKey(pod *corev1.Pod) string {
+	if key := getExplicitGKETopologyKey(pod); key != "" {
+		return key
 	}
 
 	// Use GKE label mapping one pod set to a node pool by default.
@@ -520,33 +695,42 @@ func (t *TPUWebhookServer) injectAffinity(pod *corev1.Pod, replicaIndex int, num
 	}
 
 	clusterName := pod.Labels[utils.RayClusterLabelKey]
-	topologyKey := getGKETopologyKey(pod)
+	var topologyKey string
+	if dsKey, dsTargeted := resolveDynamicSliceTopologyKey(pod, numOfHosts); dsTargeted {
+		if explicitKey := getExplicitGKETopologyKey(pod); explicitKey != "" {
+			topologyKey = explicitKey
+		} else if dsKey == "" {
+			return nil
+		} else {
+			topologyKey = dsKey
+		}
+	} else {
+		topologyKey = getGKETopologyKey(pod)
 
-	// If the current topology key is the default nodepool, attempt to discover a more specific one (block/subblock).
-	// Skip if the pod is managed by Kueue TAS or Dynamic Slicing.
-	_, subsliceRequested := pod.Annotations[tpuSubsliceTopologyAnnotation]
-	subsliceWithKueue := isDynamicSlicingOrKueueTASManaged(pod.Annotations)
-	if subsliceRequested && !subsliceWithKueue {
-		selector := labels.SelectorFromSet(pod.Spec.NodeSelector)
-		nodes, err := t.nodeLister.List(selector)
-		if err == nil && len(nodes) > 0 {
-			topology := buildTPUTopology(nodes)
-			if key, err := topology.subsliceAffinityKey(numOfHosts); err == nil {
-				topologyKey = key
-			} else {
-				// If no topologyKey could be identified despite nodes being
-				// available, the pod should be rejected with an error.
-				return fmt.Errorf("schedule pod for subslice on %d possible nodes not possible: %w", len(nodes), err)
+		// On static node pools, attempt to discover a more specific topology key (host/subblock/block)
+		// when sub-slicing is requested.
+		if _, subsliceRequested := pod.Annotations[tpuSubsliceTopologyAnnotation]; subsliceRequested {
+			selector := labels.SelectorFromSet(pod.Spec.NodeSelector)
+			nodes, err := t.nodeLister.List(selector)
+			if err == nil && len(nodes) > 0 {
+				topology := buildTPUTopology(nodes)
+				if key, err := topology.subsliceAffinityKey(numOfHosts); err == nil {
+					topologyKey = key
+				} else {
+					// If no topologyKey could be identified despite nodes being
+					// available, the pod should be rejected with an error.
+					return fmt.Errorf("schedule pod for subslice on %d possible nodes not possible: %w", len(nodes), err)
+				}
+			} else if err != nil {
+				klog.V(0).ErrorS(err, "Cannot choose subslice affinity key, list nodes returned err")
+				return err
+			} else if len(nodes) == 0 {
+				klog.V(0).Info("Cannot choose subslice affinity key, no nodes exist for choose subslice affinity")
+				// This is not an error because the pod may need to be admitted to
+				// trigger scale up.
+				// It will almost certainly be scheduled incorrectly, but the
+				// RayCluster admission should have already warned the user.
 			}
-		} else if err != nil {
-			klog.V(0).ErrorS(err, "Cannot choose subslice affinity key, list nodes returned err")
-			return err
-		} else if len(nodes) == 0 {
-			klog.V(0).Info("Cannot choose subslice affinity key, no nodes exist for choose subslice affinity")
-			// This is not an error because the pod may need to be admitted to
-			// trigger scale up.
-			// It will almost certainly be scheduled incorrectly, but the
-			// RayCluster admission should have already warned the user.
 		}
 	}
 
@@ -658,10 +842,7 @@ func checkWorkersMatchTopology(clusterName string, namespace string, workerGroup
 		return false, errors.New("Container path not specified")
 	}
 	if containerRequestingTPUs(containers...) {
-		topology, ok := workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation]
-		if !ok {
-			topology = workerGroupSpec.Template.Spec.NodeSelector[tpuTopologyLabel]
-		}
+		topology := getPodTopology(workerGroupSpec.Template.Annotations, workerGroupSpec.Template.Spec.NodeSelector)
 		klog.V(0).InfoS("checkWorkersMatchTopology", "RayCluster", namespace+"/"+clusterName, "topology", topology, "NumOfHosts", numHosts)
 		if topology == "" {
 			err := errors.New("TPU topology not specified")
@@ -729,7 +910,11 @@ func (t *TPUWebhookServer) validateRayCluster(admissionReview *admissionv1.Admis
 		desiredSubslice, subsliceRequested := workerGroupSpec.Template.Annotations[tpuSubsliceTopologyAnnotation]
 		clusterSubsliceWithKueue := isDynamicSlicingOrKueueTASManaged(raycluster.Annotations)
 		workerGroupSubsliceWithKueue := isDynamicSlicingOrKueueTASManaged(workerGroupSpec.Template.Annotations)
-		if subsliceRequested && !(clusterSubsliceWithKueue || workerGroupSubsliceWithKueue || workerGroupSpec.Template.Spec.SchedulerName == sliceSchedulerName) {
+		skipSubsliceCheck := clusterSubsliceWithKueue ||
+			workerGroupSubsliceWithKueue ||
+			workerGroupSpec.Template.Spec.SchedulerName == sliceSchedulerName ||
+			targetsDynamicSliceSelection(&workerGroupSpec.Template.Spec)
+		if subsliceRequested && !skipSubsliceCheck {
 			warning, admitErr, err := t.checkSubsliceAffinity(workerGroupSpec, desiredSubslice)
 			if err != nil {
 				return nil, err
@@ -1078,10 +1263,7 @@ func (t *TPUWebhookServer) mutatePod(admissionReview *admissionv1.AdmissionRevie
 		return nil, errors.New("Ray Pod created by KubeRay missing Group label")
 	}
 	namespace := pod.Namespace
-	topology, ok := pod.Annotations[tpuSubsliceTopologyAnnotation]
-	if !ok {
-		topology = pod.Spec.NodeSelector[tpuTopologyLabel]
-	}
+	topology := getPodTopology(pod.Annotations, pod.Spec.NodeSelector)
 	if topology == "" {
 		return nil, errors.New("Ray Pod created by KubeRay missing TPU topology nodeSelector")
 	}

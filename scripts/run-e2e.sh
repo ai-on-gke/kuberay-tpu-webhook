@@ -106,7 +106,7 @@ cat e2e/manifests/tpu7x/tpu7x-8-single-host.yaml | sed "s|rayproject/ray:nightly
 cat e2e/manifests/tpu7x/tpu7x-multi-container.yaml | sed "s|rayproject/ray:nightly-py312-tpu|$RAY_TPU7X_IMAGE|g" | kubectl apply -n "$NAMESPACE" -f -
 set +e
 echo "Running Validation, Single-Host, & Multi-Container E2E tests (Group 1)..."
-go test -timeout 60m -tags=e2e -count=1 -v ./e2e/webhook/... -run "TestWebhookMutation_V6eSingleHost|TestWebhookMutation_TorchTpuEnvs|TestRayClusterValidation|TestWebhookMutation_HeterogeneousCluster|TestWebhookMutation_V7xSingleHost|TestWebhookMutation_V7xMultiContainer"
+go test -timeout 60m -tags=e2e -count=1 -v ./e2e/webhook/... -run "TestWebhookMutation_V6eSingleHost|TestWebhookMutation_TorchTpuEnvs|TestRayClusterValidation|TestWebhookMutation_HeterogeneousCluster|TestWebhookMutation_V7xSingleHost|TestWebhookMutation_V7xMultiContainer|TestWebhookMutation_DynamicSliceDefaultScheduler"
 GROUP1_EXIT=$?
 set -e
 echo "Cleaning up Validation, Single-Host, & Multi-Container manifests..."
