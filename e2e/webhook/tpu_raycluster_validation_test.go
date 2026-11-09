@@ -40,3 +40,20 @@ func TestRayClusterValidation_NumOfHostsOmitted(t *testing.T) {
 	t.Log("Running validating webhook case: NumOfHosts omitted Rejection")
 	assertRayClusterRejected(t, cluster, errTopologyMismatch)
 }
+
+func TestRayClusterValidation_DynamicSliceDefaultScheduler_RejectsTopologyMismatch(t *testing.T) {
+	cluster := loadManifest(t, "../manifests/invalid/invalid-topology.yaml")
+	cluster.Name = "tpu-ds-slice-invalid-topology"
+	wg := &cluster.Spec.WorkerGroupSpecs[0]
+	delete(wg.Template.Spec.NodeSelector, "cloud.google.com/gke-tpu-topology")
+	wg.Template.Spec.NodeSelector["cloud.google.com/gke-tpu-slice"] = "slice-0"
+	if wg.Template.Annotations == nil {
+		wg.Template.Annotations = make(map[string]string)
+	}
+	wg.Template.Annotations["cloud.google.com/gke-tpu-slice-topology"] = "2x4"
+	// 2x4 with 8 TPUs/host expects 1 host, so NumOfHosts=2 must still be rejected.
+	wg.NumOfHosts = 2
+
+	t.Log("Running validating webhook case: Dynamic Slicing gke-tpu-slice NumOfHosts mismatch rejection")
+	assertRayClusterRejected(t, cluster, errTopologyMismatch)
+}

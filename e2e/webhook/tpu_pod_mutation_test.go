@@ -9,10 +9,16 @@ import (
 	"testing"
 	"time"
 
+	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -614,4 +620,265 @@ func TestWebhookIntegration_RayTPUUtilsAndJAX(t *testing.T) {
 
 	t.Logf("Execution output:\n%s", stdout)
 	assert.Contains(t, stdout, "All Ray core TPU utilities and JAX/XLA distributed inits verified successfully.")
+}
+
+func TestWebhookMutation_DynamicSliceDefaultScheduler(t *testing.T) {
+	clusterName := "tpu-ds-default-sched-e2e"
+	replicasTwo := int32(2)
+	replicasOne := int32(1)
+
+	makeTPUWorkerTemplate := func(
+		annotations, nodeSelector map[string]string, affinity *corev1.Affinity, env []corev1.EnvVar,
+	) corev1.PodTemplateSpec {
+		return corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: annotations,
+			},
+			Spec: corev1.PodSpec{
+				NodeSelector: nodeSelector,
+				Affinity:     affinity,
+				Containers: []corev1.Container{
+					{
+						Name:    "ray-worker",
+						Image:   "rayproject/ray:2.46.0",
+						Command: []string{"sh", "-c", "sleep 3600"},
+						Env:     env,
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:                    resource.MustParse("100m"),
+								corev1.ResourceMemory:                 resource.MustParse("128Mi"),
+								corev1.ResourceName("google.com/tpu"): resource.MustParse("4"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceName("google.com/tpu"): resource.MustParse("4"),
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	cluster := &rayv1.RayCluster{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "ray.io/v1",
+			Kind:       "RayCluster",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      clusterName,
+			Namespace: testNamespace,
+		},
+		Spec: rayv1.RayClusterSpec{
+			HeadGroupSpec: rayv1.HeadGroupSpec{
+				RayStartParams: map[string]string{"dashboard-host": "0.0.0.0"},
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:    "ray-head",
+								Image:   "rayproject/ray:2.46.0",
+								Command: []string{"sh", "-c", "sleep 3600"},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+				{
+					// Group 1: pinned Slice CR via gke-tpu-slice + gke-tpu-slice-topology annotation.
+					GroupName:      "slice-pinned",
+					Replicas:       &replicasOne,
+					NumOfHosts:     2,
+					RayStartParams: map[string]string{},
+					Template: makeTPUWorkerTemplate(
+						map[string]string{"cloud.google.com/gke-tpu-slice-topology": "2x2x2"},
+						map[string]string{
+							"cloud.google.com/gke-tpu-accelerator": "tpu7x",
+							"cloud.google.com/gke-tpu-topology":    "2x2x2",
+							"cloud.google.com/gke-tpu-slice":       "e2e-nonexistent-slice-a",
+						},
+						nil,
+						nil,
+					),
+				},
+				{
+					// Group 2: 2 MegaScale replicas selecting gke-tpu-slice In [slice-b0, slice-b1] via required NodeAffinity.
+					GroupName:      "slice-multislice",
+					Replicas:       &replicasTwo,
+					NumOfHosts:     2,
+					RayStartParams: map[string]string{},
+					Template: makeTPUWorkerTemplate(
+						nil,
+						map[string]string{
+							"cloud.google.com/gke-tpu-accelerator": "tpu7x",
+							"cloud.google.com/gke-tpu-topology":    "2x2x2",
+						},
+						&corev1.Affinity{
+							NodeAffinity: &corev1.NodeAffinity{
+								RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+									NodeSelectorTerms: []corev1.NodeSelectorTerm{
+										{
+											MatchExpressions: []corev1.NodeSelectorRequirement{
+												{
+													Key:      "cloud.google.com/gke-tpu-slice",
+													Operator: corev1.NodeSelectorOpIn,
+													Values:   []string{"e2e-nonexistent-slice-b0", "e2e-nonexistent-slice-b1"},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+						[]corev1.EnvVar{{Name: "MEGASCALE_NUM_SLICES", Value: "2"}},
+					),
+				},
+				{
+					// Group 3: exact gke-tpu-partition-2x2x2-id alongside parent 4x4x4 topology and partition.
+					GroupName:      "part-exact",
+					Replicas:       &replicasOne,
+					NumOfHosts:     2,
+					RayStartParams: map[string]string{},
+					Template: makeTPUWorkerTemplate(
+						map[string]string{"cloud.google.com/gke-tpu-slice-topology": "2x2x2"},
+						map[string]string{
+							"cloud.google.com/gke-tpu-accelerator":        "tpu7x",
+							"cloud.google.com/gke-tpu-topology":           "4x4x4",
+							"cloud.google.com/gke-tpu-partition-4x4x4-id": "e2e-nonexistent-cube",
+							"cloud.google.com/gke-tpu-partition-2x2x2-id": "e2e-nonexistent-p0",
+						},
+						nil,
+						nil,
+					),
+				},
+				{
+					// Group 4: subslice selecting only a larger parent partition via NodeAffinity (skips synthetic PodAffinity).
+					GroupName:      "part-parent-only",
+					Replicas:       &replicasOne,
+					NumOfHosts:     2,
+					RayStartParams: map[string]string{},
+					Template: makeTPUWorkerTemplate(
+						map[string]string{"cloud.google.com/gke-tpu-slice-topology": "2x2x2"},
+						map[string]string{
+							"cloud.google.com/gke-tpu-accelerator": "tpu7x",
+							"cloud.google.com/gke-tpu-topology":    "4x4x4",
+						},
+						&corev1.Affinity{
+							NodeAffinity: &corev1.NodeAffinity{
+								RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+									NodeSelectorTerms: []corev1.NodeSelectorTerm{
+										{
+											MatchExpressions: []corev1.NodeSelectorRequirement{
+												{
+													Key:      "cloud.google.com/gke-tpu-partition-4x4x4-id",
+													Operator: corev1.NodeSelectorOpIn,
+													Values:   []string{"e2e-nonexistent-sub0", "e2e-nonexistent-sub1"},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+						nil,
+					),
+				},
+			},
+		},
+	}
+
+	_ = dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+		Delete(t.Context(), clusterName, metav1.DeleteOptions{})
+
+	unstructuredObj, err := k8sruntime.DefaultUnstructuredConverter.ToUnstructured(cluster)
+	require.NoError(t, err)
+	_, err = dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+		Create(t.Context(), &unstructured.Unstructured{Object: unstructuredObj}, metav1.CreateOptions{})
+	require.NoError(t, err, "Expected Dynamic Slicing default-scheduler RayCluster to pass validating webhook")
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		err := dynamicClient.Resource(rayClusterGVR).Namespace(testNamespace).
+			Delete(ctx, clusterName, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Warning cleaning up RayCluster %s: %v", clusterName, err)
+		}
+	})
+
+	// Expect 1 head + 2 (slice-pinned) + 4 (slice-multislice) + 2 (part-exact) + 2 (part-parent-only) = 11 pods.
+	labelSelector := getLabelSelector(t, clusterName)
+	pods := waitForPods(t, labelSelector, 11)
+
+	countsByGroup := make(map[string]int)
+	msPairs := make(map[string]bool)
+
+	for _, pod := range pods.Items {
+		if pod.Labels[utils.RayNodeTypeLabelKey] != rayNodeTypeWorker {
+			continue
+		}
+		group := pod.Labels[utils.RayNodeGroupLabelKey]
+		countsByGroup[group]++
+
+		assert.Equal(t, "2,2,2,2", envVarValue(pod.Spec.Containers[0].Env, "TORCH_TPU_TOPOLOGY"))
+		assert.NotEmpty(t, pod.Spec.Hostname)
+		assert.Equal(t, clusterName+"-headless", pod.Spec.Subdomain)
+
+		if group == "part-parent-only" {
+			require.NotNil(t, pod.Spec.Affinity)
+			assert.NotNil(t, pod.Spec.Affinity.NodeAffinity, "Existing NodeAffinity must remain untouched")
+			assert.Nil(t, pod.Spec.Affinity.PodAffinity,
+				"Synthetic PodAffinity must be skipped when only parent partition is targeted")
+			assert.Nil(t, pod.Spec.Affinity.PodAntiAffinity,
+				"Synthetic PodAntiAffinity must be skipped when only parent partition is targeted")
+			continue
+		}
+
+		var expectedTopoKey string
+		switch group {
+		case "slice-pinned":
+			expectedTopoKey = "cloud.google.com/gke-tpu-slice"
+		case "slice-multislice":
+			expectedTopoKey = "cloud.google.com/gke-tpu-slice"
+			require.NotNil(t, pod.Spec.Affinity)
+			assert.NotNil(t, pod.Spec.Affinity.NodeAffinity, "Existing NodeAffinity must be preserved")
+			env := pod.Spec.Containers[0].Env
+			sliceID := envVarValue(env, megascaleSliceIDEnv)
+			workerID := envVarValue(env, tpuWorkerIDEnv)
+			msPairs[sliceID+":"+workerID] = true
+			assert.Equal(t, "8081", envVarValue(env, megascalePortEnv))
+			assert.Equal(t, fmt.Sprintf("slice-multislice-0-0.%s-headless:8081", clusterName),
+				envVarValue(env, megascaleCoordinatorAddressEnv))
+		case "part-exact":
+			expectedTopoKey = "cloud.google.com/gke-tpu-partition-2x2x2-id"
+		default:
+			t.Fatalf("Unexpected worker group %q", group)
+		}
+
+		require.NotNil(t, pod.Spec.Affinity, "Pod %s missing Affinity", pod.Name)
+		require.NotNil(t, pod.Spec.Affinity.PodAffinity, "Pod %s missing PodAffinity", pod.Name)
+		require.Len(t, pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+		assert.Equal(t, expectedTopoKey,
+			pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0].TopologyKey,
+			"Pod %s PodAffinity TopologyKey must target slice/partition instead of gke-nodepool", pod.Name)
+
+		require.NotNil(t, pod.Spec.Affinity.PodAntiAffinity, "Pod %s missing PodAntiAffinity", pod.Name)
+		require.Len(t, pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 2)
+		for _, term := range pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
+			assert.Equal(t, expectedTopoKey, term.TopologyKey,
+				"Pod %s PodAntiAffinity TopologyKey must target slice/partition instead of gke-nodepool", pod.Name)
+		}
+	}
+
+	assert.Equal(t, 2, countsByGroup["slice-pinned"])
+	assert.Equal(t, 4, countsByGroup["slice-multislice"])
+	assert.Equal(t, 2, countsByGroup["part-exact"])
+	assert.Equal(t, 2, countsByGroup["part-parent-only"])
+	assert.Len(t, msPairs, 4, "Expected 4 unique (MEGASCALE_SLICE_ID, TPU_WORKER_ID) pairs in slice-multislice")
 }
